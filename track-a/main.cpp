@@ -19,6 +19,7 @@ namespace {
 constexpr uint32_t kHours = 72;
 constexpr uint32_t kEndpoints = 1842;
 constexpr uint32_t kGroups = kHours * kEndpoints;
+constexpr uint32_t kLocalBits = 11, kLocalStride = 1u << kLocalBits;
 constexpr uint32_t kParseWorkers = 5;
 constexpr uint32_t kOutputWorkers = 4;
 constexpr uint8_t kMethodSkip[26] = {0, 0, 0, 7, 0, 0, 4, 5, 0, 0, 0, 0, 0, 0, 8};
@@ -66,7 +67,7 @@ void write_all(int fd, const std::string &out) {
 struct Worker {
   std::array<Slot, 4096> dictionary {};
   std::vector<std::string_view> names;
-  std::vector<WorkerGroup> groups = std::vector<WorkerGroup>(kGroups);
+  std::vector<WorkerGroup> groups = std::vector<WorkerGroup>(kHours * kLocalStride);
   std::array<std::array<char, 13>, kHours> hours {};
   std::array<uint8_t, kHours> seen {};
   std::vector<Record> records;
@@ -101,7 +102,7 @@ struct Worker {
       uint32_t latency = 0;
       while (*p != '\n') latency = latency * 10 + static_cast<uint32_t>(*p++ - '0');
       ++p;
-      const uint32_t key = hour * kEndpoints + id;
+      const uint32_t key = (hour << kLocalBits) | id;
       WorkerGroup &group = groups[key];
       ++group.count;
       group.errors += error;
@@ -174,7 +175,7 @@ int main() {
     for (uint32_t hour = 0; hour < kHours; ++hour) {
       if (worker.seen[hour]) std::memcpy(hours[hour].data(), worker.hours[hour].data(), 13);
       for (uint32_t id = 0; id < worker.names.size(); ++id) {
-        const WorkerGroup &src = worker.groups[hour * kEndpoints + id];
+        const WorkerGroup &src = worker.groups[(hour << kLocalBits) | id];
         Group &dst = groups[hour * kEndpoints + remaps[w][id]];
         dst.count += src.count;
         dst.errors += src.errors;
@@ -194,7 +195,7 @@ int main() {
     for (uint32_t hour = 0; hour < kHours; ++hour) {
       for (uint32_t id = 0; id < workers[w].names.size(); ++id) {
         const uint32_t key = hour * kEndpoints + remaps[w][id];
-        cursors[w][key] = workers[w].groups[hour * kEndpoints + id].count;
+        cursors[w][key] = workers[w].groups[(hour << kLocalBits) | id].count;
       }
     }
   }
@@ -210,7 +211,8 @@ int main() {
   auto scatter = [&](uint32_t w) {
     std::vector<uint32_t> &cursor = cursors[w];
     for (const Record &record : workers[w].records) {
-      const uint32_t key = (record.group / kEndpoints) * kEndpoints + remaps[w][record.group % kEndpoints];
+      const uint32_t key = (record.group >> kLocalBits) * kEndpoints +
+                           remaps[w][record.group & (kLocalStride - 1)];
       latencies[cursor[key]++] = record.latency;
     }
   };
