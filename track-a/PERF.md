@@ -52,3 +52,11 @@
 - Compared exact-checked 64-bit sampled mixing with SSE4.2 CRC32 over the same length/front/middle/back samples. The CRC is only a dictionary fingerprint; full-string equality remains mandatory, including on hash collisions.
 - Local GCC 14.2 synthetic 3.1M-lookup test with 1,842 generator-shaped names: sampled mixing 27.59 ms versus CRC32 21.17 ms sequential; five-thread microbench narrowed the advantage, so end-to-end validation was required.
 - [CI run 41111964540](https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41111964540) passed official seed-1 tiny/sample/full hashes, seed-2 differential, synthetic oracle, Docker allowlist and offline Docker. Seven-run full seed-1 CI medians against pre-selection commit 47e3db0: 0.093236 s versus 0.081989 s (ratio 0.8794). Different CI runners make comparisons across runs unreliable; no official scoring-box score claimed.
+
+## CRC dictionary and local-group packing, October 30
+
+- CRC32 endpoint fingerprints already carry only 32 significant bits; changing slots from 16 to 8 bytes preserves mandatory full-key collision checks and halves each 4,096-slot dictionary's footprint.
+- [CI 41120129110](https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41120129110) passed all official seed-1 hashes, seed-2 sample differential, synthetic oracle and restricted Docker. Thirteen-run paired seed-1 full medians: prior `2ce5a1f` 0.091071 s, compact-slot `e8377e8` 0.090357 s (ratio 0.9922).
+- Packed worker-local group keys into an 11-bit endpoint ID and hour bits; removed constant division/modulo from the 3.1M-record parallel scatter loop. Global group indices remain unchanged.
+- [CI 41120372612](https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41120372612) passed the same gates. Thirteen-run paired seed-1 full medians: `e8377e8` 0.105081 s, packed-key `8d82b51` 0.103475 s (ratio 0.9847).
+- The paired CI results are hardware-specific, and 0.8%/1.5% changes are not conclusively outside noise; no official scoring-box T/M/S/D or hidden-seed result is claimed.

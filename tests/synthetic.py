@@ -16,6 +16,9 @@ ENDPOINTS = ['/', '/health', '/healthz', '/v2/checkout', '/v2/orders',
              '/v2/orderstatus',
              '/internal/v1/tenants/{tenant_id}/projects/{project_id}/pipelines/{pipeline_id}/runs/{run_id}/artifacts/{artifact_id}:download']
 ENDPOINTS += [f'/v{i % 3}/item/{i}/{{id}}' for i in range(1829)]
+# Same length/front/middle/back 8-byte CRC samples, different full keys.
+COLLISION_ENDPOINTS = ('/api/v2/' + 'a' * 32, '/api/v2/' + 'a' * 5 + 'b' + 'a' * 26)
+ENDPOINTS[13:15] = COLLISION_ENDPOINTS
 STATUSES = (200, 201, 202, 204, 301, 302, 304, 400, 401, 403, 404,
             405, 409, 410, 422, 429, 499, 500, 501, 502, 503, 504, 599)
 
@@ -31,6 +34,9 @@ def check(binary, seed, count):
         status = rng.choice(STATUSES)
         ts = hours[hour] + f'{rng.randrange(60):02d}:{rng.randrange(60):02d}.{rng.randrange(1000000):06d}Z'
         rows.append(f'{ts} {METHODS[i % 7]} {endpoint} {status} {latency}\n')
+    if count >= 2:
+        rows[0] = f'{hours[0]}00:00.000000Z GET {COLLISION_ENDPOINTS[0]} 200 1\n'
+        rows[1] = f'{hours[0]}00:00.000000Z GET {COLLISION_ENDPOINTS[1]} 500 2\n'
     if count > 4:
         rows[2] = rows[1]
     grouped = defaultdict(lambda: [[], 0])

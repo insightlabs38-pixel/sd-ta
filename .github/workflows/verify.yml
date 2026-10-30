@@ -86,3 +86,8 @@ jobs:
             --mount type=bind,source=/tmp/a-container-out,target=/out \
             sd-track-a
           echo 'c24fa507c963eaeac9224fd8435019b4f4e8c002ece7e32f316681a3957eb92f  /tmp/a-container-out/summary.txt' | sha256sum -c -
+          docker run --rm --network=none --read-only --memory=8g --memory-swap=8g --pids-limit=512 --tmpfs /tmp:rw,size=1g \
+            --mount type=bind,source=/tmp/a-full,target=/data,readonly \
+            --mount type=bind,source=/tmp/a-container-out,target=/out \
+            sd-track-a
+          echo '495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3  /tmp/a-container-out/summary.txt' | sha256sum -c -
