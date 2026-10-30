@@ -227,7 +227,7 @@ int main() {
         const uint32_t r50 = (50 * n + 99) / 100 - 1;
         const uint32_t r95 = (95 * n + 99) / 100 - 1;
         const uint32_t r99 = (99 * n + 99) / 100 - 1;
-        if (n <= 256) {
+        if (n <= 32) {
           std::sort(first, first + n);
         } else {
           std::nth_element(first, first + r50, first + n);
