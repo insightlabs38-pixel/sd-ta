@@ -230,9 +230,9 @@ int main() {
         if (n <= 256) {
           std::sort(first, first + n);
         } else {
-          std::nth_element(first, first + r99, first + n);
-          std::nth_element(first, first + r95, first + r99);
-          std::nth_element(first, first + r50, first + r95);
+          std::nth_element(first, first + r50, first + n);
+          std::nth_element(first + r50 + 1, first + r95, first + n);
+          std::nth_element(first + r95 + 1, first + r99, first + n);
         }
         output.append(hours[hour].data(), 13);
         output.append(":00:00Z ");
