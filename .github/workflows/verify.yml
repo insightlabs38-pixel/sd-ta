@@ -46,8 +46,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --depth=1 origin 8c754fc3be5637f063c0b0147dffcf3f4d408372
-          git show 8c754fc3be5637f063c0b0147dffcf3f4d408372:track-a/main.cpp > /tmp/a-prev.cpp
+          git fetch --depth=1 origin 2ce5a1fc4a46e78106ac9bf80d6218bebc07ad5b
+          git show 2ce5a1fc4a46e78106ac9bf80d6218bebc07ad5b:track-a/main.cpp > /tmp/a-prev.cpp
           g++ -O3 -std=c++20 -DNDEBUG -pthread -static-libstdc++ -static-libgcc -o /tmp/a-prev /tmp/a-prev.cpp
           python - <<'PY'
           import hashlib, os, random, statistics, subprocess, time
@@ -56,7 +56,7 @@ jobs:
           binaries = {'champion': '/tmp/a-prev', 'candidate': './solution'}
           samples = {key: [] for key in binaries}
           rng = random.Random(20261030)
-          for _ in range(7):
+          for _ in range(13):
               order = list(binaries)
               rng.shuffle(order)
               for key in order:
@@ -67,7 +67,7 @@ jobs:
                       assert hashlib.sha256(f.read()).hexdigest() == expected
           old = statistics.median(samples['champion'])
           new = statistics.median(samples['candidate'])
-          print(f'Full seed-1 7-run medians: champion={old:.6f}s candidate={new:.6f}s ratio={new/old:.4f}', flush=True)
+          print(f'Full seed-1 13-run medians: champion={old:.6f}s candidate={new:.6f}s ratio={new/old:.4f}', flush=True)
           PY
       - name: Validate Docker allowlist and offline sandbox
         shell: bash
