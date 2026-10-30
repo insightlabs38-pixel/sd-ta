@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <nmmintrin.h>
 #include <string>
 #include <string_view>
 #include <sys/mman.h>
@@ -29,7 +30,7 @@ struct Slot { uint64_t hash = 0; uint32_t id_plus_one = 0; };
   std::perror(message);
   std::exit(1);
 }
-uint64_t endpoint_hash(std::string_view name) {
+__attribute__((target("sse4.2"))) uint64_t endpoint_hash(std::string_view name) {
   const size_t n = name.size();
   uint64_t a = 0, b = 0, c = 0;
   if (n < 8) std::memcpy(&a, name.data(), n);
@@ -38,11 +39,9 @@ uint64_t endpoint_hash(std::string_view name) {
     std::memcpy(&b, name.data() + (n - 8) / 2, 8);
     std::memcpy(&c, name.data() + n - 8, 8);
   }
-  uint64_t h = (n + 0x9e3779b97f4a7c15ULL) * 0xbf58476d1ce4e5b9ULL;
-  h = (h ^ a) * 0x94d049bb133111ebULL;
-  h = (h ^ (h >> 30) ^ b) * 0xbf58476d1ce4e5b9ULL;
-  h = (h ^ (h >> 27) ^ c) * 0x94d049bb133111ebULL;
-  return h ^ (h >> 31);
+  uint64_t h = _mm_crc32_u64(n, a);
+  h = _mm_crc32_u64(h, b);
+  return _mm_crc32_u64(h, c);
 }
 uint32_t hour_index(const char *p) {
   const uint32_t day = (p[8] - '0') * 10 + (p[9] - '0');
