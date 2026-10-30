@@ -1,9 +1,17 @@
 # Track A performance log
 
-## Initial exact C++ baseline, October 30, 2026
+## Exact C++ baseline, October 30, 2026
 
-- Design: single mmap parse, endpoint interning, count/scatter, exact local sorting or multiselect.
-- Local compiler: GCC 14.2, `-O3 -std=c++20 -static-libstdc++ -static-libgcc`.
-- Synthetic differential tests: 12 cases covering empty and small files, 1,000 to 310,000 records, four seeds, unsigned-32-bit latency extremes, duplicated lines, all status classes, month/hour boundaries, and endpoint ordering. All passed against a Python integer oracle.
-- Local 310,000-record synthetic run: 0.05 s wall and 36,544 KiB peak RSS on the available development container. This is **not** an official benchmark or a scoring-box measurement.
-- Official public seed-1 and holdout hashes: pending GitHub CI. No board run ID exists yet; Luna records actual board IDs after integration.
+- Design: mmap parse, full-byte endpoint interning, count/scatter, exact local sorting or multiselect.
+- Compiler: GCC 14.2, `-O3 -std=c++20 -static-libstdc++ -static-libgcc`.
+- Local differential tests: 12 cases, empty through 310,000 records, four seeds, uint32 extremes, duplicates, statuses, boundaries, bytewise endpoint order. All passed against Python oracle.
+- Official worked example: byte-exact locally. Official seed-1 and unseen-seed hashes await GitHub CI.
+- Initial 310,000-record synthetic run: 0.05 s wall, 36,544 KiB peak RSS, local development container only.
+
+## Local full-size synthetic comparisons
+
+- Generated 3,100,000 legal-format lines (~204 MiB) with a Zipf-skewed endpoint distribution. This is **not** the official dataset or scoring hardware.
+- 20 randomized-order, single-core pinned trials: initial unordered-map baseline median 0.3103 s, exact full-key flat hash table median 0.2645 s. Variance and cross-run contention remain significant.
+- Sorting/selection threshold 256 is an additional local candidate; performance varied within host noise. All 12 synthetic differential cases passed after combining it with the flat table.
+- Two-pass direct scatter challenger measured 0.4944 s median versus 0.3252 s one-pass on 12 local trials; rejected for now.
+- No official board run ID exists yet. Luna records actual board IDs after verified integration.

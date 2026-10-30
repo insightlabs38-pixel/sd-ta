@@ -6,12 +6,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -70,8 +70,12 @@ int main() {
   close(input);
   if (bytes) madvise(const_cast<char *>(mapped), bytes, MADV_SEQUENTIAL);
 
-  std::unordered_map<std::string_view, uint32_t> dictionary;
-  dictionary.reserve(kEndpoints * 2);
+  struct Slot {
+    uint64_t hash = 0;
+    uint32_t id_plus_one = 0;
+  };
+  std::array<Slot, 4096> dictionary {};
+  const std::hash<std::string_view> hasher;
   std::vector<std::string_view> names;
   names.reserve(kEndpoints);
   std::vector<Group> groups(kGroups);
@@ -89,15 +93,20 @@ int main() {
     const char *const endpoint = ++p;
     while (*p != ' ') ++p;
     const std::string_view name(endpoint, static_cast<size_t>(p - endpoint));
-    auto found = dictionary.find(name);
+    const uint64_t hash = hasher(name);
+    uint32_t pos = static_cast<uint32_t>(hash) & 4095;
+    while (dictionary[pos].id_plus_one &&
+           !(dictionary[pos].hash == hash && names[dictionary[pos].id_plus_one - 1] == name)) {
+      pos = (pos + 1) & 4095;
+    }
     uint32_t id;
-    if (found == dictionary.end()) {
+    if (!dictionary[pos].id_plus_one) {
       id = static_cast<uint32_t>(names.size());
       if (id >= kEndpoints) fail("too many endpoints");
       names.push_back(name);
-      dictionary.emplace(name, id);
+      dictionary[pos] = {hash, id + 1};
     } else {
-      id = found->second;
+      id = dictionary[pos].id_plus_one - 1;
     }
     const bool error = p[1] == '5'; // Status is exactly three digits, 100..599.
     p += 5; // Space, three status digits, space.
@@ -137,7 +146,7 @@ int main() {
       const uint32_t r50 = (50 * n + 99) / 100 - 1;
       const uint32_t r95 = (95 * n + 99) / 100 - 1;
       const uint32_t r99 = (99 * n + 99) / 100 - 1;
-      if (n <= 96) {
+      if (n <= 256) {
         std::sort(first, first + n);
       } else {
         std::nth_element(first, first + r99, first + n);
