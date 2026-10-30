@@ -67,3 +67,9 @@
 - Local GCC 14.2, 4-CPU-quota host, 3.1M-row synthetic datasets, randomized paired full-program trials: Zipf-skewed 50-run medians 0.070169 s (fixed) vs 0.069359 s (dynamic); uniform 40-run medians 0.078380 s vs 0.076012 s. Gains are small and noisy, not official hardware results.
 - 310k-row independent Python oracle matched; 3.1M skewed/uniform outputs matched champion SHA-256. ASan/UBSan and TSan passed on 100k-row synthetic data. Peak RSS was effectively unchanged in earlier 3.1M comparisons. Splitting each hour into 2/4/8 tasks and packing count/error into 64 bits were slower locally and rejected.
 - Previous full-input [CI 41120735228](https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41120735228) passed official hashes and restricted full Docker. Its prior-vs-prior 13-run median varied by 2%, reinforcing the need for paired, repeated measurements. Official T/M/S/D and hidden-seed scoring remain outstanding.
+
+## Five output workers with hourly work stealing, October 30
+
+- Compared dynamic output worker counts 2/3/4/5/6/8 on a 4-CPU-quota host. Five workers beat four on both 3.1M-row synthetic distributions; two/three were slower, and six/eight offered no consistent additional benefit.
+- Randomized 60-run paired full-program medians: Zipf-skewed 0.068446 s (four) vs 0.065432 s (five); uniform 0.076108 s vs 0.073007 s. Approximately 4.1–4.4% lower median wall time locally; not official scoring hardware.
+- Five-worker output matched independent 310k-row Python oracle and 3.1M-row full-output SHA-256. ASan/UBSan and TSan passed on 310k synthetic data. This one-line worker-count change does not alter output ordering, source footprint materially, or dependency count. CI/official scoring remain separate gates.
