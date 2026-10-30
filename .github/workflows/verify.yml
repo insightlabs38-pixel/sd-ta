@@ -1,0 +1,44 @@
+name: Track A exactness
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Compile baseline
+        run: g++ -O3 -std=c++20 -DNDEBUG -static-libstdc++ -static-libgcc -o solution track-a/main.cpp
+      - name: Differential synthetic tests
+        run: python tests/synthetic.py "$PWD/solution"
+      - name: Verify official seed-1 tiny, sample and full hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/hackathon-raptors/speed-demon-2026.git /tmp/organizer
+          mkdir -p /tmp/a-out
+          for scale in tiny sample full; do
+            mkdir -p "/tmp/a-$scale"
+            python /tmp/organizer/generators/a_ingest.py --seed 1 --scale "$scale" --out "/tmp/a-$scale"
+            SD_DATA_DIR="/tmp/a-$scale" SD_OUT_DIR=/tmp/a-out ./solution
+            case "$scale" in
+              tiny) expected=c24fa507c963eaeac9224fd8435019b4f4e8c002ece7e32f316681a3957eb92f ;;
+              sample) expected=ca6311bbeb536fa55d85265bf6fd3d24cc9586f13de1ac73bd2a23ac3893aac3 ;;
+              full) expected=495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3 ;;
+            esac
+            echo "$expected  /tmp/a-out/summary.txt" | sha256sum -c -
+          done
+      - name: Holdout-like seed-2 sample differential
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/a-seed2 /tmp/a-ref
+          python /tmp/organizer/generators/a_ingest.py --seed 2 --scale sample --out /tmp/a-seed2
+          python /tmp/organizer/reference/a_ingest.py --data /tmp/a-seed2 --out /tmp/a-ref
+          SD_DATA_DIR=/tmp/a-seed2 SD_OUT_DIR=/tmp/a-out ./solution
+          cmp /tmp/a-out/summary.txt /tmp/a-ref/summary.txt
