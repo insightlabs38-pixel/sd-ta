@@ -21,7 +21,7 @@ constexpr uint32_t kHours = 72;
 constexpr uint32_t kEndpoints = 1842;
 constexpr uint32_t kGroups = kHours * kEndpoints;
 constexpr uint32_t kLocalBits = 11, kLocalStride = 1u << kLocalBits;
-constexpr uint32_t kParseWorkers = 5;
+constexpr uint32_t kParseWorkers = 6;
 constexpr uint32_t kOutputWorkers = 5;
 constexpr uint8_t kMethodSkip[26] = {0, 0, 0, 7, 0, 0, 4, 5, 0, 0, 0, 0, 0, 0, 8};
 
