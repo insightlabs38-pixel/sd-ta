@@ -33,21 +33,24 @@ jobs:
             esac
             echo "$expected  /tmp/a-out/summary.txt" | sha256sum -c -
           done
-      - name: Holdout-like seed-2 sample differential
+      - name: Holdout-like seed-2 and seed-3 sample differential
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p /tmp/a-seed2 /tmp/a-ref
-          python /tmp/organizer/generators/a_ingest.py --seed 2 --scale sample --out /tmp/a-seed2
-          python /tmp/organizer/reference/a_ingest.py --data /tmp/a-seed2 --out /tmp/a-ref
-          SD_DATA_DIR=/tmp/a-seed2 SD_OUT_DIR=/tmp/a-out ./solution
-          cmp /tmp/a-out/summary.txt /tmp/a-ref/summary.txt
+          for seed in 2 3; do
+            mkdir -p "/tmp/a-seed$seed"
+            python /tmp/organizer/generators/a_ingest.py --seed "$seed" --scale sample --out "/tmp/a-seed$seed"
+            python /tmp/organizer/reference/a_ingest.py --data "/tmp/a-seed$seed" --out /tmp/a-ref
+            SD_DATA_DIR="/tmp/a-seed$seed" SD_OUT_DIR=/tmp/a-out ./solution
+            cmp /tmp/a-out/summary.txt /tmp/a-ref/summary.txt
+          done
       - name: Compare full-input end-to-end runtime with verified champion
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --depth=1 origin e8377e8bac0b5fd173fcd947fdac3ba34120b69a
-          git show e8377e8bac0b5fd173fcd947fdac3ba34120b69a:track-a/main.cpp > /tmp/a-prev.cpp
+          git fetch --depth=1 origin 7e5ee07a69a79673caeb779c1d2c0ac0b28d0d2a
+          git show 7e5ee07a69a79673caeb779c1d2c0ac0b28d0d2a:track-a/main.cpp > /tmp/a-prev.cpp
           g++ -O3 -std=c++20 -DNDEBUG -pthread -static-libstdc++ -static-libgcc -o /tmp/a-prev /tmp/a-prev.cpp
           python - <<'PY'
           import hashlib, os, random, statistics, subprocess, time

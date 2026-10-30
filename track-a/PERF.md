@@ -60,3 +60,10 @@
 - Packed worker-local group keys into an 11-bit endpoint ID and hour bits; removed constant division/modulo from the 3.1M-record parallel scatter loop. Global group indices remain unchanged.
 - [CI 41120372612](https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41120372612) passed the same gates. Thirteen-run paired seed-1 full medians: `e8377e8` 0.105081 s, packed-key `8d82b51` 0.103475 s (ratio 0.9847).
 - The paired CI results are hardware-specific, and 0.8%/1.5% changes are not conclusively outside noise; no official scoring-box T/M/S/D or hidden-seed result is claimed.
+
+## Dynamic hourly output scheduling, October 30
+
+- Replaced fixed 18-hour worker partitions with an atomic 72-hour work queue. Each hour owns a distinct output buffer and disjoint latency spans; concatenating buffers by hour preserves byte-exact order. Four output workers remain.
+- Local GCC 14.2, 4-CPU-quota host, 3.1M-row synthetic datasets, randomized paired full-program trials: Zipf-skewed 50-run medians 0.070169 s (fixed) vs 0.069359 s (dynamic); uniform 40-run medians 0.078380 s vs 0.076012 s. Gains are small and noisy, not official hardware results.
+- 310k-row independent Python oracle matched; 3.1M skewed/uniform outputs matched champion SHA-256. ASan/UBSan and TSan passed on 100k-row synthetic data. Peak RSS was effectively unchanged in earlier 3.1M comparisons. Splitting each hour into 2/4/8 tasks and packing count/error into 64 bits were slower locally and rejected.
+- Previous full-input [CI 41120735228](https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41120735228) passed official hashes and restricted full Docker. Its prior-vs-prior 13-run median varied by 2%, reinforcing the need for paired, repeated measurements. Official T/M/S/D and hidden-seed scoring remain outstanding.

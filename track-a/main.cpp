@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <charconv>
 #include <cstdint>
@@ -228,13 +229,16 @@ int main() {
   for (uint32_t i = 0; i < order.size(); ++i) order[i] = i;
   std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) { return names[a] < names[b]; });
 
-  std::array<std::string, kOutputWorkers> parts;
-  auto produce = [&](uint32_t worker) {
-    std::string &output = parts[worker];
-    output.reserve(bytes / (20 * kOutputWorkers) + 4096);
-    for (uint32_t hour = worker * (kHours / kOutputWorkers);
-         hour < (worker + 1) * (kHours / kOutputWorkers); ++hour) {
-      for (const uint32_t id : order) {
+  std::array<std::string, kHours> parts;
+  std::atomic<uint32_t> next_hour{0};
+  auto produce = [&] {
+    while (true) {
+      const uint32_t hour = next_hour.fetch_add(1, std::memory_order_relaxed);
+      if (hour >= kHours) break;
+      std::string &output = parts[hour];
+      output.reserve(bytes / (20 * kHours) + 4096);
+      for (uint32_t j = 0; j < order.size(); ++j) {
+        const uint32_t id = order[j];
         const Group &group = groups[hour * kEndpoints + id];
         const uint32_t n = group.count;
         if (!n) continue;
@@ -270,8 +274,8 @@ int main() {
   };
   std::array<std::thread, kOutputWorkers - 1> output_threads;
   for (uint32_t i = 1; i < kOutputWorkers; ++i)
-    output_threads[i - 1] = std::thread(produce, i);
-  produce(0);
+    output_threads[i - 1] = std::thread(produce);
+  produce();
   for (auto &thread : output_threads) thread.join();
 
   const char *const out_dir = std::getenv("SD_OUT_DIR");
