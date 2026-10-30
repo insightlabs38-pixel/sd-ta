@@ -46,3 +46,9 @@
 - Local GCC 14.2 dictionary-lookup microbenchmark on 3.1M Zipf-sampled requests and 1,842 generator-shaped endpoint templates: full std::hash 0.0715 s versus sampled 0.0334 s sequential (eight interleaved repetitions), matching ID checksums. This is a standalone component test, not a full-program result.
 - Across 100 independently generated 1,842-name REST-template catalogues, ten total duplicate sample signatures occurred, with at most one per catalogue; exact key comparisons always resolve them. A pathological adversarial catalogue could be slower, so official and additional-seed full-program validation is required.
 - Added a single CI full-input paired benchmark against the last verified champion to test whether the component gain survives complete execution. No official scoring-box T/M/S/D claim is made.
+
+## Hardware CRC fingerprint qualification, October 30
+
+- Compared exact-checked 64-bit sampled mixing with SSE4.2 CRC32 over the same length/front/middle/back samples. The CRC is only a dictionary fingerprint; full-string equality remains mandatory, including on hash collisions.
+- Local GCC 14.2 synthetic 3.1M-lookup test with 1,842 generator-shaped names: sampled mixing 27.59 ms versus CRC32 21.17 ms sequential; five-thread microbench narrowed the advantage, so end-to-end validation was required.
+- [CI run 41111964540](https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41111964540) passed official seed-1 tiny/sample/full hashes, seed-2 differential, synthetic oracle, Docker allowlist and offline Docker. Seven-run full seed-1 CI medians against pre-selection commit 47e3db0: 0.093236 s versus 0.081989 s (ratio 0.8794). Different CI runners make comparisons across runs unreliable; no official scoring-box score claimed.

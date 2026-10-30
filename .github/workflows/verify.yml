@@ -46,8 +46,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --depth=1 origin 47e3db040a9635730679144cdc899d258b037b8c
-          git show 47e3db040a9635730679144cdc899d258b037b8c:track-a/main.cpp > /tmp/a-prev.cpp
+          git fetch --depth=1 origin 8c754fc3be5637f063c0b0147dffcf3f4d408372
+          git show 8c754fc3be5637f063c0b0147dffcf3f4d408372:track-a/main.cpp > /tmp/a-prev.cpp
           g++ -O3 -std=c++20 -DNDEBUG -pthread -static-libstdc++ -static-libgcc -o /tmp/a-prev /tmp/a-prev.cpp
           python - <<'PY'
           import hashlib, os, random, statistics, subprocess, time

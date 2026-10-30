@@ -21,9 +21,11 @@ constexpr uint32_t kEndpoints = 1842;
 constexpr uint32_t kGroups = kHours * kEndpoints;
 constexpr uint32_t kParseWorkers = 5;
 constexpr uint32_t kOutputWorkers = 4;
+constexpr uint8_t kMethodSkip[26] = {0, 0, 0, 7, 0, 0, 4, 5, 0, 0, 0, 0, 0, 0, 8};
 
 struct Record { uint32_t group, latency; };
 struct Group { uint32_t count = 0, errors = 0, cursor = 0; };
+struct WorkerGroup { uint32_t count = 0, errors = 0; };
 struct Slot { uint64_t hash = 0; uint32_t id_plus_one = 0; };
 
 [[noreturn]] void fail(const char *message) {
@@ -64,7 +66,7 @@ void write_all(int fd, const std::string &out) {
 struct Worker {
   std::array<Slot, 4096> dictionary {};
   std::vector<std::string_view> names;
-  std::vector<Group> groups = std::vector<Group>(kGroups);
+  std::vector<WorkerGroup> groups = std::vector<WorkerGroup>(kGroups);
   std::array<std::array<char, 13>, kHours> hours {};
   std::array<uint8_t, kHours> seen {};
   std::vector<Record> records;
@@ -76,8 +78,8 @@ struct Worker {
       const char *const line = p;
       const uint32_t hour = hour_index(p);
       p += 28;
-      while (*p != ' ') ++p;
-      const char *const endpoint = ++p;
+      p += *p == 'P' ? (p[1] == 'O' ? 5 : p[1] == 'U' ? 4 : 6) : kMethodSkip[*p - 'A'];
+      const char *const endpoint = p;
       p = static_cast<const char *>(std::memchr(p, ' ', static_cast<size_t>(end - p)));
       const std::string_view name(endpoint, static_cast<size_t>(p - endpoint));
       const uint64_t hash = endpoint_hash(name);
@@ -100,7 +102,7 @@ struct Worker {
       while (*p != '\n') latency = latency * 10 + static_cast<uint32_t>(*p++ - '0');
       ++p;
       const uint32_t key = hour * kEndpoints + id;
-      Group &group = groups[key];
+      WorkerGroup &group = groups[key];
       ++group.count;
       group.errors += error;
       if (!seen[hour]) {
@@ -172,7 +174,7 @@ int main() {
     for (uint32_t hour = 0; hour < kHours; ++hour) {
       if (worker.seen[hour]) std::memcpy(hours[hour].data(), worker.hours[hour].data(), 13);
       for (uint32_t id = 0; id < worker.names.size(); ++id) {
-        const Group &src = worker.groups[hour * kEndpoints + id];
+        const WorkerGroup &src = worker.groups[hour * kEndpoints + id];
         Group &dst = groups[hour * kEndpoints + remaps[w][id]];
         dst.count += src.count;
         dst.errors += src.errors;
