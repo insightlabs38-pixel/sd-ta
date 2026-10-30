@@ -47,6 +47,20 @@ __attribute__((target("sse4.2"))) uint32_t endpoint_hash(std::string_view name) 
   h = _mm_crc32_u64(h, b);
   return _mm_crc32_u64(h, c);
 }
+__attribute__((always_inline)) inline uint32_t intern(std::string_view name, std::array<Slot, 4096> &dictionary,
+                std::vector<std::string_view> &names) {
+  const uint32_t hash = endpoint_hash(name);
+  uint32_t pos = hash & 4095;
+  while (dictionary[pos].id_plus_one &&
+         !(dictionary[pos].hash == hash && names[dictionary[pos].id_plus_one - 1] == name))
+    pos = (pos + 1) & 4095;
+  if (dictionary[pos].id_plus_one) return dictionary[pos].id_plus_one - 1;
+  const uint32_t id = static_cast<uint32_t>(names.size());
+  if (id >= kEndpoints) fail("too many endpoints");
+  names.push_back(name);
+  dictionary[pos] = {hash, id + 1};
+  return id;
+}
 uint32_t hour_index(const char *p) {
   const uint32_t day = (p[8] - '0') * 10 + (p[9] - '0');
   const uint32_t hour = (p[11] - '0') * 10 + (p[12] - '0');
@@ -84,20 +98,7 @@ struct Worker {
       const char *const endpoint = p;
       p = static_cast<const char *>(std::memchr(p, ' ', static_cast<size_t>(end - p)));
       const std::string_view name(endpoint, static_cast<size_t>(p - endpoint));
-      const uint32_t hash = endpoint_hash(name);
-      uint32_t pos = hash & 4095;
-      while (dictionary[pos].id_plus_one &&
-             !(dictionary[pos].hash == hash && names[dictionary[pos].id_plus_one - 1] == name))
-        pos = (pos + 1) & 4095;
-      uint32_t id;
-      if (!dictionary[pos].id_plus_one) {
-        id = static_cast<uint32_t>(names.size());
-        if (id >= kEndpoints) fail("too many endpoints");
-        names.push_back(name);
-        dictionary[pos] = {hash, id + 1};
-      } else {
-        id = dictionary[pos].id_plus_one - 1;
-      }
+      const uint32_t id = intern(name, dictionary, names);
       const bool error = p[1] == '5';
       p += 5;
       uint32_t latency = 0;
@@ -157,20 +158,7 @@ int main() {
     Worker &worker = workers[w];
     remaps[w].reserve(worker.names.size());
     for (const std::string_view name : worker.names) {
-      const uint32_t hash = endpoint_hash(name);
-      uint32_t pos = hash & 4095;
-      while (dictionary[pos].id_plus_one &&
-             !(dictionary[pos].hash == hash && names[dictionary[pos].id_plus_one - 1] == name))
-        pos = (pos + 1) & 4095;
-      uint32_t id;
-      if (!dictionary[pos].id_plus_one) {
-        id = static_cast<uint32_t>(names.size());
-        if (id >= kEndpoints) fail("too many endpoints");
-        names.push_back(name);
-        dictionary[pos] = {hash, id + 1};
-      } else {
-        id = dictionary[pos].id_plus_one - 1;
-      }
+      const uint32_t id = intern(name, dictionary, names);
       remaps[w].push_back(id);
     }
     for (uint32_t hour = 0; hour < kHours; ++hour) {

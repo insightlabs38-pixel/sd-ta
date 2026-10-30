@@ -80,3 +80,12 @@
 - Thirteen paired full seed-1 CI medians: `a1a061f` std::to_chars 0.111769 s, `624fcec` two-digit lookup 0.111210 s (ratio 0.9950); only 0.50% faster, smaller than likely runner variation.
 - Lookup adds 21 nonblank noncomment C++ source lines (277 to 298 before clang-format). With the frozen K formula and unchanged memory/dependencies, the measured T gain is outweighed by the S penalty: estimated K(candidate)/K(champion) = 0.9916. Exact scc-formatted S may differ slightly.
 - Reverted the formatter to the earlier CI-passing `a1a061f` source; other algorithms remain unchanged. Requalify this restoration via CI before promoting. No official scoring-box K is claimed.
+
+## Exact endpoint interning deduplication and selection alternatives, October 30
+
+- Refactored the two identical exact-checked CRC32 dictionary insertion paths into one always-inline helper; source shrinks from 277 to 265 nonblank noncomment C++ lines before clang-format, with no dependency changes.
+- Local GCC 14.2 on a 4-CPU-quota host, 3.1M-row 219MB Zipf-shaped legal-format corpus: 50 randomized paired full-program medians 0.069893 s (prior) vs 0.070333 s (deduplicated), ratio 1.0063; the 0.6% slowdown is within observed runner noise and potentially outweighed by the source-axis improvement. Output SHA-256 matched byte-for-byte.
+- Independent Python-oracle differential on 310k rows matched exactly, and ASan/UBSan plus TSan passed on the same corpus. Original source bytes reconstructed locally and verified against Git blob SHA before tests.
+- Explored exact shared-prefix MSD radix multiselection: 9,800 randomized oracle cases passed, selection-only Zipf model 32.934 ms to 25.453 ms at 512-element crossover, but end-to-end 50-run median improved only 1.54% while adding 67 source lines; estimated full K declines, so not promoted.
+- Eliminating stored hour strings in favor of reconstructed fixed-span hour labels matched full output but gave no reliable full-program improvement and was not promoted.
+- The interning deduplication is a candidate pending official seed hashes, CI paired T and Docker; preserve 6c8c910 as the previous passing champion. No scoring-box result is claimed.
