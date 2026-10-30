@@ -4,7 +4,7 @@ Dependency-free C++20 implementation of the [Speed Demon 2026 Track A specificat
 
 ## Approach
 
-Five newline-aligned mmap partitions are parsed concurrently. Each worker uses a compact, full-key-checked endpoint dictionary and exact per-hour counters, then emits packed group/latency records. After the workers join, endpoint IDs are reconciled by full-string equality, counts are merged, and latencies are scattered into contiguous group spans. Four output workers independently compute exact nearest-rank percentiles and serialize disjoint hour ranges in deterministic byte order.
+Five newline-aligned mmap partitions are parsed concurrently. Each worker uses a compact, full-key-checked endpoint dictionary and exact per-hour counters, then emits packed group/latency records. After the workers join, endpoint IDs are reconciled by full-string equality, counts are merged, and latencies are scattered into contiguous group spans. Five output workers independently compute exact nearest-rank percentiles and serialize disjoint hour ranges in deterministic byte order.
 
 ## Dependencies
 

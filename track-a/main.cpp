@@ -52,31 +52,10 @@ uint32_t hour_index(const char *p) {
   const uint32_t hour = (p[11] - '0') * 10 + (p[12] - '0');
   return p[6] == '0' ? (day - 30) * 24 + hour - 18 : 30 + (day - 1) * 24 + hour;
 }
-constexpr auto kDecimalPairs = [] {
-  std::array<std::array<char, 2>, 100> digits {};
-  for (uint32_t i = 0; i < 100; ++i) {
-    digits[i][0] = static_cast<char>('0' + i / 10);
-    digits[i][1] = static_cast<char>('0' + i % 10);
-  }
-  return digits;
-}();
 void append_number(std::string &out, uint64_t value) {
   char buffer[24];
-  char *p = buffer + sizeof(buffer);
-  while (value >= 100) {
-    const uint64_t quotient = value / 100;
-    const uint32_t remainder = static_cast<uint32_t>(value - quotient * 100);
-    p -= 2;
-    std::memcpy(p, kDecimalPairs[remainder].data(), 2);
-    value = quotient;
-  }
-  if (value >= 10) {
-    p -= 2;
-    std::memcpy(p, kDecimalPairs[value].data(), 2);
-  } else {
-    *--p = static_cast<char>('0' + value);
-  }
-  out.append(p, buffer + sizeof(buffer) - p);
+  const auto result = std::to_chars(buffer, buffer + sizeof(buffer), value);
+  out.append(buffer, result.ptr);
 }
 void write_all(int fd, const std::string &out) {
   size_t offset = 0;

@@ -73,3 +73,10 @@
 - Compared dynamic output worker counts 2/3/4/5/6/8 on a 4-CPU-quota host. Five workers beat four on both 3.1M-row synthetic distributions; two/three were slower, and six/eight offered no consistent additional benefit.
 - Randomized 60-run paired full-program medians: Zipf-skewed 0.068446 s (four) vs 0.065432 s (five); uniform 0.076108 s vs 0.073007 s. Approximately 4.1–4.4% lower median wall time locally; not official scoring hardware.
 - Five-worker output matched independent 310k-row Python oracle and 3.1M-row full-output SHA-256. ASan/UBSan and TSan passed on 310k synthetic data. This one-line worker-count change does not alter output ordering, source footprint materially, or dependency count. CI/official scoring remain separate gates.
+
+## Decimal formatter full-score gate, October 30
+
+- [CI 41136084173](https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41136084173) passed official seed-1 tiny/sample/full hashes, seed-2/3 differential, synthetic oracle, offline Docker allowlist and restricted full-input Docker.
+- Thirteen paired full seed-1 CI medians: `a1a061f` std::to_chars 0.111769 s, `624fcec` two-digit lookup 0.111210 s (ratio 0.9950); only 0.50% faster, smaller than likely runner variation.
+- Lookup adds 21 nonblank noncomment C++ source lines (277 to 298 before clang-format). With the frozen K formula and unchanged memory/dependencies, the measured T gain is outweighed by the S penalty: estimated K(candidate)/K(champion) = 0.9916. Exact scc-formatted S may differ slightly.
+- Reverted the formatter to the earlier CI-passing `a1a061f` source; other algorithms remain unchanged. Requalify this restoration via CI before promoting. No official scoring-box K is claimed.
