@@ -6,7 +6,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
-#include <functional>
 #include <string>
 #include <string_view>
 #include <sys/mman.h>
@@ -29,6 +28,21 @@ struct Slot { uint64_t hash = 0; uint32_t id_plus_one = 0; };
 [[noreturn]] void fail(const char *message) {
   std::perror(message);
   std::exit(1);
+}
+uint64_t endpoint_hash(std::string_view name) {
+  const size_t n = name.size();
+  uint64_t a = 0, b = 0, c = 0;
+  if (n < 8) std::memcpy(&a, name.data(), n);
+  else {
+    std::memcpy(&a, name.data(), 8);
+    std::memcpy(&b, name.data() + (n - 8) / 2, 8);
+    std::memcpy(&c, name.data() + n - 8, 8);
+  }
+  uint64_t h = (n + 0x9e3779b97f4a7c15ULL) * 0xbf58476d1ce4e5b9ULL;
+  h = (h ^ a) * 0x94d049bb133111ebULL;
+  h = (h ^ (h >> 30) ^ b) * 0xbf58476d1ce4e5b9ULL;
+  h = (h ^ (h >> 27) ^ c) * 0x94d049bb133111ebULL;
+  return h ^ (h >> 31);
 }
 uint32_t hour_index(const char *p) {
   const uint32_t day = (p[8] - '0') * 10 + (p[9] - '0');
@@ -57,7 +71,6 @@ struct Worker {
   std::vector<Record> records;
 
   void parse(const char *p, const char *end) {
-    const std::hash<std::string_view> hasher;
     names.reserve(kEndpoints);
     records.reserve(static_cast<size_t>(end - p) / 70 + 128);
     while (p < end) {
@@ -68,7 +81,7 @@ struct Worker {
       const char *const endpoint = ++p;
       p = static_cast<const char *>(std::memchr(p, ' ', static_cast<size_t>(end - p)));
       const std::string_view name(endpoint, static_cast<size_t>(p - endpoint));
-      const uint64_t hash = hasher(name);
+      const uint64_t hash = endpoint_hash(name);
       uint32_t pos = static_cast<uint32_t>(hash) & 4095;
       while (dictionary[pos].id_plus_one &&
              !(dictionary[pos].hash == hash && names[dictionary[pos].id_plus_one - 1] == name))
@@ -132,7 +145,6 @@ int main() {
   }
 
   std::array<Slot, 4096> dictionary {};
-  const std::hash<std::string_view> hasher;
   std::vector<std::string_view> names;
   names.reserve(kEndpoints);
   std::vector<Group> groups(kGroups);
@@ -142,7 +154,7 @@ int main() {
     Worker &worker = workers[w];
     remaps[w].reserve(worker.names.size());
     for (const std::string_view name : worker.names) {
-      const uint64_t hash = hasher(name);
+      const uint64_t hash = endpoint_hash(name);
       uint32_t pos = static_cast<uint32_t>(hash) & 4095;
       while (dictionary[pos].id_plus_one &&
              !(dictionary[pos].hash == hash && names[dictionary[pos].id_plus_one - 1] == name))
