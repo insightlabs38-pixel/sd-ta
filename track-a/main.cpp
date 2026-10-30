@@ -20,7 +20,7 @@ constexpr uint32_t kHours = 72;
 constexpr uint32_t kEndpoints = 1842;
 constexpr uint32_t kGroups = kHours * kEndpoints;
 constexpr uint32_t kParseWorkers = 4;
-constexpr uint32_t kOutputWorkers = 3;
+constexpr uint32_t kOutputWorkers = 4;
 
 struct Record { uint32_t group, latency; };
 struct Group { uint32_t count = 0, errors = 0, cursor = 0; };
