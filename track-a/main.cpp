@@ -19,7 +19,7 @@ namespace {
 constexpr uint32_t kHours = 72;
 constexpr uint32_t kEndpoints = 1842;
 constexpr uint32_t kGroups = kHours * kEndpoints;
-constexpr uint32_t kParseWorkers = 4;
+constexpr uint32_t kParseWorkers = 5;
 constexpr uint32_t kOutputWorkers = 4;
 
 struct Record { uint32_t group, latency; };
