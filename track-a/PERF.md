@@ -256,3 +256,9 @@
 - CI 31-run full-input candidate median 0.032782 s, compared to older six-worker base 0.039465 s and packed-only 0.042694 s; this run did not pair the candidate with the immediate PR #2 champion, so no speedup versus that champion is established.
 - Five-run candidate cgroup peak ranged 7,999,488–10,838,016 bytes, versus older six-worker base 6,111,232–9,515,008 bytes. A separate local 12-vector RSS check found no meaningful committed-memory reduction from dropping reserve (3,776 versus 3,780 KiB).
 - **Not promoted:** reserve commits virtual address space, not necessarily resident pages; evidence does not establish a complete-K improvement over the current qualified champion. Restore exact source blob `24926c0187974683c9e96ebac46d48073d5907d5` and preserve the candidate in Git history.
+
+## Output cache-eviction cadence trial — October 31
+
+- Candidate `e96477a` retained hourly `sync_file_range` but batched `POSIX_FADV_DONTNEED` to every fourth hour. Local 10 MiB/72-chunk syscall benchmark favored batched eviction (median 1.80 versus 2.81 ms with per-hour sync), but this is not a scored benchmark.
+- [CI 41242381794](https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41242381794) passed all correctness, sanitizer and Docker gates. Its candidate full-input median was 0.034935 s against an older six-worker baseline 0.034117 s (not the exact PR #2 champion); five-run candidate cgroup max was 17,633,280 B versus old baseline 7,823,360 B. Memory volatility is large, but no complete-K gain was established.
+- **Rejected batched prefix eviction.** Next candidate advises only newly completed, page-aligned output ranges each hour, avoiding repeated O(hours²) prefix scans while preserving timely eviction. Workflow baseline is updated to the exact PR #2 champion `82493a1` for paired comparison. Promotion requires official hashes, sanitizers, Docker and complete-K evidence.
