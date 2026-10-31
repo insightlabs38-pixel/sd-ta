@@ -112,10 +112,11 @@ struct SpinLock {
   void unlock() { held.clear(std::memory_order_release); }
 };
 
-// Exact endpoint dictionary: 8-way buckets, lock-free hits, locked inserts
-// published by a release store of the tag (relies on x86 load ordering).
+// Exact endpoint dictionary: 8-way buckets, atomic acquire tag reads,
+// locked inserts and release publication of immutable key images.
 // Keys are stored zero-padded after a space, so n + 1 equal bytes prove
 // equality.
+struct CacheEntry { uint32_t hash = 0, id = 0; };
 struct Names {
   struct alignas(64) Bucket {
     uint32_t tag[8];
@@ -153,14 +154,18 @@ struct Names {
         return -1;
     }
   }
-  __attribute__((always_inline)) uint32_t find(const char *ep, uint32_t n) {
+  __attribute__((always_inline)) uint32_t find(const char *ep, uint32_t n, CacheEntry (&cache)[256]) {
     const uint64_t keep = n < 8 ? n * 8 : 64;
     const uint64_t x = _bzhi_u64(load64(ep), keep),
                    y = _bzhi_u64(load64(ep + std::max(n, 8u) - 8), keep);
     const uint32_t h = _mm_crc32_u64(_mm_crc32_u64(n, x), y) | 1;
+    CacheEntry &entry = cache[h & 255];
+    if (entry.hash == h && same(entry.id, ep, n)) return entry.id;
     Bucket *b;
-    const int id = lookup(ep, n, h, b);
-    return id >= 0 ? id : add(ep, n, h);
+    const int found = lookup(ep, n, h, b);
+    const uint32_t id = found >= 0 ? found : add(ep, n, h);
+    entry = {h, id};
+    return id;
   }
   uint32_t add(const char *ep, uint32_t n, uint32_t h) {
     std::lock_guard<SpinLock> lock(mu);
@@ -238,14 +243,15 @@ struct Job {
 
   // Parses one line and returns the next; 256 readable bytes must follow p.
   __attribute__((always_inline)) const char *
-  line(const char *p, Rec *(&wp)[kHours], Rec *(&bp)[kHours]) {
+  line(const char *p, Rec *(&wp)[kHours], Rec *(&bp)[kHours],
+       CacheEntry (&cache)[256]) {
     const uint32_t hour = (p[9] + (p[6] & 1)) * 24 + p[11] * 10 + p[12] - 1698;
     const char *q = p + 28;
     uint64_t m = spaces(q) | uint64_t{spaces(q + 32)} << 32;
     const uint32_t k1 = __builtin_ctzll(m);
     m &= m - 1;
     const uint32_t k2 = m ? __builtin_ctzll(m) : far_space(q);
-    const uint32_t id = names.find(q + k1 + 1, k2 - k1 - 1);
+    const uint32_t id = names.find(q + k1 + 1, k2 - k1 - 1, cache);
     const char *s = q + k2 + 1;
     const uint32_t error = *s == '5';
     s += 4;
@@ -272,6 +278,7 @@ struct Job {
 
   void parse(uint32_t block) {
     Rec *wp[kHours]{}, *bp[kHours]{};
+    CacheEntry cache[256]{};
     const char *pos[kStreams],
         *stop[kStreams]; // interleaved streams overlap their latencies
     const char *p = align(block), *end = align(block + 1);
@@ -284,10 +291,10 @@ struct Job {
     };
     while (live())
       for (uint32_t i = 0; i < kStreams; ++i)
-        pos[i] = line(pos[i], wp, bp);
+        pos[i] = line(pos[i], wp, bp, cache);
     for (uint32_t i = 0; i < kStreams; ++i)
       while (pos[i] < stop[i])
-        pos[i] = line(pos[i], wp, bp);
+        pos[i] = line(pos[i], wp, bp, cache);
 
     std::lock_guard<std::mutex> lock(mu);
     int last = 0;
