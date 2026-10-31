@@ -25,8 +25,8 @@ constexpr uint32_t kParseWorkers = 5;
 constexpr uint32_t kOutputWorkers = 5;
 constexpr uint8_t kMethodSkip[26] = {0, 0, 0, 7, 0, 0, 4, 5, 0, 0, 0, 0, 0, 0, 8};
 
-struct __attribute__((packed)) Record { uint32_t group : 24, latency : 24; };
-static_assert(sizeof(Record) == 6);
+struct __attribute__((packed)) Record { uint32_t group : 24; uint32_t latency; };
+static_assert(sizeof(Record) == 7);
 struct Group { uint32_t count = 0, errors = 0, cursor = 0; };
 struct WorkerGroup { uint32_t count = 0; };
 struct Slot { uint32_t hash = 0, id_plus_one = 0; };
@@ -87,7 +87,6 @@ struct Worker {
   std::array<uint8_t, kHours> seen {};
   std::vector<Record> records;
   std::vector<uint32_t> error_keys;
-  std::vector<uint32_t> overflow;
 
   void parse(const char *p, const char *end) {
     names.reserve(kEndpoints);
@@ -111,7 +110,6 @@ struct Worker {
         seen[hour] = 1;
         std::memcpy(hours[hour].data(), line, 13);
       }
-      if (latency >= 0xffffff) { overflow.push_back(latency); latency = 0xffffff; }
       records.push_back({key, latency});
       if (error) error_keys.push_back(key);
     }
@@ -203,11 +201,10 @@ int main() {
   }
   auto scatter = [&](uint32_t w) {
     std::vector<uint32_t> &cursor = cursors[w];
-    size_t overflow_index = 0;
     for (const Record &record : workers[w].records) {
       const uint32_t key = (record.group >> kLocalBits) * kEndpoints +
                            remaps[w][record.group & (kLocalStride - 1)];
-      latencies[cursor[key]++] = record.latency == 0xffffff ? workers[w].overflow[overflow_index++] : record.latency;
+      latencies[cursor[key]++] = record.latency;
     }
   };
   std::array<std::thread, kParseWorkers - 1> scatter_threads;
