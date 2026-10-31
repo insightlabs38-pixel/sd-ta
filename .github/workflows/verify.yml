@@ -101,3 +101,21 @@ jobs:
             --mount type=bind,source=/tmp/a-container-out,target=/out \
             sd-track-a
           echo '495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3  /tmp/a-container-out/summary.txt' | sha256sum -c -
+
+      - name: Compare scored-style cgroup memory peaks
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/a-prev-image
+          cp /tmp/a-prev.cpp /tmp/a-prev-image/main.cpp
+          cp track-a/Dockerfile /tmp/a-prev-image/Dockerfile
+          docker build --network=none --pull=false -t sd-track-a-prev -f /tmp/a-prev-image/Dockerfile /tmp/a-prev-image
+          for label in champion candidate; do
+            image=sd-track-a-prev
+            if [ "$label" = candidate ]; then image=sd-track-a; fi
+            echo "Measuring $label cgroup memory.peak"
+            docker run --rm --network=none --read-only --memory=8g --memory-swap=8g --pids-limit=512 --tmpfs /tmp:rw,size=1g \
+              --mount type=bind,source=/tmp/a-full,target=/data,readonly \
+              --mount type=bind,source=/tmp/a-container-out,target=/out \
+              --entrypoint /bin/sh "$image" -c '/solution && cat /sys/fs/cgroup/memory.peak'
+          done
