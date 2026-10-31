@@ -89,3 +89,12 @@
 - Explored exact shared-prefix MSD radix multiselection: 9,800 randomized oracle cases passed, selection-only Zipf model 32.934 ms to 25.453 ms at 512-element crossover, but end-to-end 50-run median improved only 1.54% while adding 67 source lines; estimated full K declines, so not promoted.
 - Eliminating stored hour strings in favor of reconstructed fixed-span hour labels matched full output but gave no reliable full-program improvement and was not promoted.
 - The interning deduplication is a candidate pending official seed hashes, CI paired T and Docker; preserve 6c8c910 as the previous passing champion. No scoring-box result is claimed.
+
+## Seven-byte packed tuples and score gate, October 31
+
+- A 24-bit packed group/error field plus full 32-bit latency reduces each staged record from eight to seven bytes; a compile-time size assertion and exact full-width latency preserve the input contract. No added runtime dependency.
+- [CI 41167284476](https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41167284476) passed official seed-1 hashes, seed-2/3 sample differential, synthetic oracle and restricted offline Docker. Group-first packed layout: 0.082158 s vs 0.081315 s x86-64-v3 champion median; cgroup memory.peak 40,689,664 vs 43,847,680 bytes.
+- [CI 41167386234](https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41167386234) passed the same gates for latency-first layout.
+- [CI 41167517902](https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41167517902) passed a direct 13-run paired comparison: group-first 0.111273 s, latency-first 0.111713 s, x86-64-v3 champion 0.110813 s; corresponding Docker cgroup peaks 40,919,040, 40,693,760 and 44,109,824 bytes. Layouts are effectively tied, so the simpler group-first layout was retained.
+- Estimated full T/M/S/D score improvement for group-first over the old champion on the final paired CI runner: **+1.25% K**, assuming one extra counted source line and unchanged D. This is not an official scoring-box result; single cgroup measurements and runner noise remain limitations.
+- Reducing tuple reserve slack from /70 to /73 changed cgroup peak by only 20 KiB, because untouched virtual capacity is not charged; reverted. A six-byte tuple with sparse overflow sideband was slower than seven bytes in a local Zipf-shaped count/scatter microbenchmark and was not promoted.

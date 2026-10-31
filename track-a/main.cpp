@@ -26,7 +26,7 @@ constexpr uint32_t kParseWorkers = 5;
 constexpr uint32_t kOutputWorkers = 5;
 constexpr uint8_t kMethodSkip[26] = {0, 0, 0, 7, 0, 0, 4, 5, 0, 0, 0, 0, 0, 0, 8};
 
-struct __attribute__((packed)) Record { uint32_t latency; uint32_t group : 24; };
+struct __attribute__((packed)) Record { uint32_t group : 24; uint32_t latency; };
 static_assert(sizeof(Record) == 7);
 struct Group { uint32_t count = 0, errors = 0, cursor = 0; };
 struct WorkerGroup { uint32_t count = 0, errors = 0; };
@@ -110,7 +110,7 @@ struct Worker {
         seen[hour] = 1;
         std::memcpy(hours[hour].data(), line, 13);
       }
-      records.push_back({latency, key | (static_cast<uint32_t>(error) << kErrorShift)});
+      records.push_back({key | (static_cast<uint32_t>(error) << kErrorShift), latency});
     }
     for (const Record &record : records) {
       WorkerGroup &group = groups[record.group & kGroupMask];
