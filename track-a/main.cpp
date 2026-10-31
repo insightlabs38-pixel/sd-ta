@@ -198,7 +198,7 @@ struct Job {
     return p;
   }
   // Parses one line and returns the next; at least 256 readable bytes must follow p.
-  __attribute__((always_inline)) const char *line(const char *p, Run (&cur)[kHours]) {
+  __attribute__((always_inline)) const char *line(const char *p, Rec *(&wp)[kHours], Rec *(&bp)[kHours]) {
     const uint32_t hour = hour_index(p);
     const char *q = p + 28;
     uint64_t m = spaces(q) | static_cast<uint64_t>(spaces(q + 32)) << 32;
@@ -231,13 +231,14 @@ struct Job {
       lat = digits8(v);
       for (s += 8; *s != '\n'; ++s) lat = lat * 10 + static_cast<uint64_t>(*s - '0');
     }
-    Run &run = cur[hour];
-    if (!run.rec) run.rec = take_run();
-    run.rec[run.n++] = {static_cast<uint32_t>(lat), static_cast<uint16_t>(id | error << 11)};
+    Rec *&w = wp[hour];
+    if (!w) w = bp[hour] = take_run();
+    const uint64_t rec = lat | static_cast<uint64_t>(id | error << 11) << 32;
+    std::memcpy(w++, &rec, 8);  // the next record overwrites the 2 spare bytes
     return s + 1;
   }
   // Parses the lines starting in [p, end) as kStreams independent streams so their latencies overlap.
-  const char *lines(const char *p, const char *end, Run (&cur)[kHours]) {
+  void lines(const char *p, const char *end, Rec *(&wp)[kHours], Rec *(&bp)[kHours]) {
     const char *at[kStreams + 1], *pos[kStreams];
     at[0] = p;
     for (uint32_t i = 1; i < kStreams; ++i) at[i] = p < end ? std::min(end, next_line(p + (end - p) * i / kStreams)) : p;
@@ -249,28 +250,21 @@ struct Job {
       return live;
     };
     while (all_live())
-      for (uint32_t i = 0; i < kStreams; ++i) pos[i] = line(pos[i], cur);
+      for (uint32_t i = 0; i < kStreams; ++i) pos[i] = line(pos[i], wp, bp);
     for (uint32_t i = 0; i < kStreams; ++i)
-      while (pos[i] < at[i + 1]) pos[i] = line(pos[i], cur);
-    return *std::max_element(pos, pos + kStreams);
+      while (pos[i] < at[i + 1]) pos[i] = line(pos[i], wp, bp);
   }
 
   void parse(uint32_t block) {
-    Run cur[kHours] {};
-    const char *end = align(block + 1);
-    const char *tail = lines(align(block), std::min(end, base + size - std::min<size_t>(size, 256)), cur);
-    if (tail < end) {  // the last lines are parsed from a zero-padded copy
-      char copy[1024] {};
-      std::memcpy(copy, tail, static_cast<size_t>(end - tail));
-      lines(copy, copy + (end - tail), cur);
-    }
+    Rec *wp[kHours] {}, *bp[kHours] {};
+    lines(align(block), align(block + 1), wp, bp);
     std::lock_guard<std::mutex> lock(mu);
     uint32_t hi = 0;
     for (uint32_t h = 0; h < kHours; ++h) {
-      if (!cur[h].rec) continue;
+      if (!bp[h]) continue;
       hi = h;
-      if (h < next_hour) { bad = true; pool.push_back(cur[h].rec); }
-      else runs[h].push_back(cur[h]);
+      if (h < next_hour) { bad = true; pool.push_back(bp[h]); }
+      else runs[h].push_back({bp[h], static_cast<uint32_t>(wp[h] - bp[h])});
     }
     done[block] = 1;
     block_max[block] = static_cast<uint8_t>(hi);
@@ -414,8 +408,9 @@ int main() {
   struct stat statbuf {};
   if (fstat(input, &statbuf) != 0) fail("stat requests");
   const size_t bytes = static_cast<size_t>(statbuf.st_size);
-  const char *mapped = bytes ? static_cast<const char *>(mmap(nullptr, bytes, PROT_READ, MAP_PRIVATE, input, 0)) : nullptr;
-  if (bytes && mapped == MAP_FAILED) fail("mmap requests");
+  char *mapped = static_cast<char *>(mmap(nullptr, bytes + 8192, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+  if (mapped == MAP_FAILED || (bytes && mmap(mapped, bytes, PROT_READ, MAP_PRIVATE | MAP_FIXED, input, 0) == MAP_FAILED))
+    fail("mmap requests");
   close(input);
 
   const char *const out_dir = std::getenv("SD_OUT_DIR");
