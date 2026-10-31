@@ -53,7 +53,7 @@ uint64_t digits8(uint64_t v) {
 // Places the k-th smallest of a[lo, hi) at a[k], smaller values before it and
 // larger ones after (branchless Lomuto partitions; ranges <= 16 are sorted).
 void select(uint32_t *a, uint32_t lo, uint32_t hi, uint32_t k) {
-  for (int depth = 0; hi - lo > 16; ++depth) {
+  for (int depth = 0; hi - lo > 8; ++depth) {
     if (depth > 48) return std::nth_element(a + lo, a + k, a + hi);
     const uint32_t x = a[lo], y = a[lo + (hi - lo) / 2], z = a[hi - 1];
     const uint32_t pivot = std::max(std::min(x, y), std::min(std::max(x, y), z));
