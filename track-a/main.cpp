@@ -22,7 +22,7 @@
 namespace {
 constexpr uint32_t kHours = 72, kIds = 2048, kBlock = 256 << 10, kStreams = 4;
 constexpr uint32_t kLag = 2, kNever = 1000, kAhead = 48, kKeep = 2;
-constexpr uint32_t kRunCap = kBlock / 40 + 16, kPartCap = kIds * 256;
+constexpr uint32_t kRunCap = kBlock / 40 + 16;
 const char *const kDays[] = {"2026-10-30", "2026-10-31", "2026-11-01",
                              "2026-11-02"};
 
@@ -203,7 +203,6 @@ struct Job {
   bool writing = false;
   std::vector<Rec *> runbufs; // free buffers, guarded by mu
   std::vector<std::vector<uint32_t>> latbufs;
-  std::vector<std::unique_ptr<char[]>> outbufs;
 
   Job(const char *b, size_t n, uint32_t l, int f, uint32_t t)
       : base(b), size(n), lag(l), nblocks((n + kBlock - 1) / kBlock),
@@ -312,14 +311,15 @@ struct Job {
       std::lock_guard<SpinLock> names_lock(names.mu);
       order = names.sorted;
     }
-    uint32_t count[2 * kIds] = {}, pos[kIds],
-                       total = 0; // by tag: ids, then their 5xx
+    uint32_t count[2 * kIds] = {}, pos[kIds], total = 0, out_cap = 0;
     for (const auto &[rec, n] : mine)
       for (uint32_t i = 0; i < n; ++i)
         ++count[rec[i].tag];
     for (const uint16_t id : order) {
       pos[id] = total;
       total += count[id] + count[id + kIds];
+      if (count[id] + count[id + kIds])
+        out_cap += 96 + names.len[id];
     }
     std::vector<uint32_t> lat = take(latbufs);
     lat.reserve(1 << 17);
@@ -328,9 +328,7 @@ struct Job {
       for (uint32_t i = 0; i < n; ++i)
         lat[pos[rec[i].tag % kIds]++] = rec[i].lat;
 
-    std::unique_ptr<char[]> text = take(outbufs);
-    if (!text)
-      text.reset(new char[kPartCap]);
+    std::unique_ptr<char[]> text(new char[out_cap ? out_cap : 1]);
     char *out = text.get(), label[22];
     std::snprintf(label, sizeof label, "%sT%02u:00:00Z ",
                   kDays[(hour + 18) / 24], (hour + 18) % 24);
@@ -390,10 +388,6 @@ struct Job {
       sync_file_range(fd, end[written], part.second, SYNC_FILE_RANGE_WRITE);
       if (written >= kKeep)
         posix_fadvise(fd, 0, end[written - kKeep + 1], POSIX_FADV_DONTNEED);
-      {
-        std::lock_guard<std::mutex> pool_lock(mu);
-        outbufs.push_back(std::move(part.first));
-      }
       lock.lock();
     }
     writing = false;
