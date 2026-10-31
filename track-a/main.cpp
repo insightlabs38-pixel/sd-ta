@@ -21,7 +21,6 @@ constexpr uint32_t kHours = 72;
 constexpr uint32_t kEndpoints = 1842;
 constexpr uint32_t kGroups = kHours * kEndpoints;
 constexpr uint32_t kLocalBits = 11, kLocalStride = 1u << kLocalBits;
-constexpr uint32_t kErrorShift = 18, kGroupMask = (1u << kErrorShift) - 1;
 constexpr uint32_t kParseWorkers = 5;
 constexpr uint32_t kOutputWorkers = 5;
 constexpr uint8_t kMethodSkip[26] = {0, 0, 0, 7, 0, 0, 4, 5, 0, 0, 0, 0, 0, 0, 8};
@@ -29,7 +28,7 @@ constexpr uint8_t kMethodSkip[26] = {0, 0, 0, 7, 0, 0, 4, 5, 0, 0, 0, 0, 0, 0, 8
 struct __attribute__((packed)) Record { uint32_t group : 24; uint32_t latency; };
 static_assert(sizeof(Record) == 7);
 struct Group { uint32_t count = 0, errors = 0, cursor = 0; };
-struct WorkerGroup { uint32_t count = 0, errors = 0; };
+struct WorkerGroup { uint32_t count = 0; };
 struct Slot { uint32_t hash = 0, id_plus_one = 0; };
 
 [[noreturn]] void fail(const char *message) {
@@ -87,6 +86,7 @@ struct Worker {
   std::array<std::array<char, 13>, kHours> hours {};
   std::array<uint8_t, kHours> seen {};
   std::vector<Record> records;
+  std::vector<uint32_t> error_keys;
 
   void parse(const char *p, const char *end) {
     names.reserve(kEndpoints);
@@ -110,12 +110,12 @@ struct Worker {
         seen[hour] = 1;
         std::memcpy(hours[hour].data(), line, 13);
       }
-      records.push_back({key | (static_cast<uint32_t>(error) << kErrorShift), latency});
+      records.push_back({key, latency});
+      if (error) error_keys.push_back(key);
     }
     for (const Record &record : records) {
-      WorkerGroup &group = groups[record.group & kGroupMask];
+      WorkerGroup &group = groups[record.group];
       ++group.count;
-      group.errors += record.group >> kErrorShift;
     }
   }
 };
@@ -173,10 +173,13 @@ int main() {
         const uint32_t key = hour * kEndpoints + remaps[w][id];
         Group &dst = groups[key];
         dst.count += src.count;
-        dst.errors += src.errors;
         cursors[w][key] = src.count;
       }
     }
+    for (const uint32_t local : worker.error_keys)
+      ++groups[(local >> kLocalBits) * kEndpoints + remaps[w][local & (kLocalStride - 1)]].errors;
+    worker.error_keys.clear();
+    worker.error_keys.shrink_to_fit();
     worker.groups.clear();
     worker.groups.shrink_to_fit();
   }
@@ -199,7 +202,7 @@ int main() {
   auto scatter = [&](uint32_t w) {
     std::vector<uint32_t> &cursor = cursors[w];
     for (const Record &record : workers[w].records) {
-      const uint32_t key = ((record.group & kGroupMask) >> kLocalBits) * kEndpoints +
+      const uint32_t key = (record.group >> kLocalBits) * kEndpoints +
                            remaps[w][record.group & (kLocalStride - 1)];
       latencies[cursor[key]++] = record.latency;
     }
