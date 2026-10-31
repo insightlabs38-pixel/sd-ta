@@ -201,3 +201,10 @@
 
 - The streaming hour-epoch source blob `2d60fab7bc533d01c31167ca0cd5d66216013ec9` was promoted to `sd-sm` commit `8298e2cbe0d21ffd4688bb23b625f988fdd4128d`. Official run `run-b447dc4b353e` passed all five gates with T=0.020573 s, M=21,041,152 B, S=441, D=1, K=46.641863 and 83.438795 points. This beats the prior BEST `run-2e35ec2bc727` (K=44.826321) by 4.05%.
 - Official evidence and rollback state are recorded in the submission repository; the prior dev main source remains recoverable in its Git history.
+
+## Concurrent dictionary race rollback — October 31
+
+- Official-promoted source blob `2d60fab7bc533d01c31167ca0cd5d66216013ec9` uses non-atomic AVX2 tag reads concurrent with release stores. [CI 41218843179](https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41218843179) and [CI 41219011089](https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41219011089) failed ThreadSanitizer: write in `Names::add` versus non-atomic vector read in `Names::lookup`. Official output hashes do not establish race freedom.
+- Restored exact qualified threshold-16 candidate source blob `f364d2123e1fde3869ab6a79fc6e0c85ba5aa085` from `3e5a945`: acquire-load dictionary tags, six-byte record copies, initialized spinlock and six-worker default. [CI 41217509351](https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41217509351) passed official seed-1 hashes, seed-2/3, disorder, ASan/UBSan, TSan and restricted Docker.
+- Paired 31-run full-input CI medians: six-worker champion 0.037612 s, threshold-16 candidate 0.037453 s (0.42% faster); five-run maximum cgroup peaks 8,347,648 and 7,045,120 bytes. This is a CI proxy, not an official six-core K. The previously official-promoted source scored K=46.641863, but its race requires correction before further promotion.
+- Luna controls official submission. Do not integrate/re-promote the racing blob; use this qualified rollback for independent scoring-box verification and official rerun. This dev commit does not modify the submission repository.

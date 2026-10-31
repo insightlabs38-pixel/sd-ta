@@ -21,7 +21,7 @@
 
 namespace {
 constexpr uint32_t kHours = 72, kIds = 2048, kBlock = 256 << 10, kStreams = 4;
-constexpr uint32_t kLag = 2, kNever = 1000, kKeep = 2;
+constexpr uint32_t kLag = 2, kNever = 1000, kAhead = 48, kKeep = 2;
 constexpr uint32_t kRunCap = kBlock / 40 + 16, kPartCap = kIds * 256;
 const char *const kDays[] = {"2026-10-30", "2026-10-31", "2026-11-01",
                              "2026-11-02"};
@@ -101,7 +101,7 @@ void select(uint32_t *a, uint32_t lo, uint32_t hi, uint32_t k) {
 // Dictionary inserts are tiny and bursty at startup, so waiters spin instead of
 // sleeping.
 struct SpinLock {
-  std::atomic_flag held;
+  std::atomic_flag held = ATOMIC_FLAG_INIT;
   void lock() {
     for (int i = 0; held.test_and_set(std::memory_order_acquire); ++i)
       if (i < 64)
@@ -141,13 +141,12 @@ struct Names {
   int lookup(const char *ep, uint32_t n, uint32_t h, Bucket *&b) {
     for (uint32_t i = h >> 16;; ++i) {
       b = buckets + (i & 511);
-      uint32_t m = _mm256_movemask_ps(_mm256_castsi256_ps(
-          _mm256_cmpeq_epi32(load(b->tag), _mm256_set1_epi32(h))));
-      for (; m; m &= m - 1)
-        if (same(b->id[__builtin_ctz(m)], ep, n))
-          return b->id[__builtin_ctz(m)];
-      if (!b->tag[7])
-        return -1;
+      for (uint32_t lane = 0; lane < 8; ++lane) {
+        const uint32_t tag = __atomic_load_n(&b->tag[lane], __ATOMIC_ACQUIRE);
+        if (tag == h && same(b->id[lane], ep, n))
+          return b->id[lane];
+        if (!tag) return -1;
+      }
     }
   }
   __attribute__((always_inline)) uint32_t find(const char *ep, uint32_t n) {
@@ -166,7 +165,7 @@ struct Names {
       return found;
     const uint32_t id = size++;
     uint32_t slot = 0;
-    while (b->tag[slot])
+    while (__atomic_load_n(&b->tag[slot], __ATOMIC_RELAXED))
       ++slot;
     if (id >= kIds)
       fail("too many endpoints");
@@ -260,10 +259,10 @@ struct Job {
     if (!w) {
       Rec *r = take(runbufs);
       w = bp[hour] =
-          r ? r : static_cast<Rec *>(std::malloc(kRunCap * sizeof(Rec)));
+          r ? r : static_cast<Rec *>(std::malloc(kRunCap * sizeof(Rec) + sizeof(uint64_t)));
     }
     const uint64_t rec = lat | uint64_t{id | error << 11} << 32;
-    std::memcpy(w++, &rec, 8); // the next record overwrites the 2 spare bytes
+    std::memcpy(w++, &rec, sizeof(Rec));
     return s + 1;
   }
 
@@ -347,9 +346,13 @@ struct Job {
       const uint32_t r50 = (50 * n + 99) / 100 - 1,
                      r95 = (95 * n + 99) / 100 - 1,
                      r99 = (99 * n + 99) / 100 - 1;
-      select(a, 0, n, r50);
-      select(a, r50 + 1, n, r95);
-      select(a, r95 + 1, n, r99);
+      if (n <= 16)
+        std::sort(a, a + n);
+      else {
+        select(a, 0, n, r50);
+        select(a, r50 + 1, n, r95);
+        select(a, r95 + 1, n, r99);
+      }
       std::memcpy(out, label, 21);
       std::memcpy(out + 21, names.img[id], names.len[id]);
       out += 21 + names.len[id];
@@ -406,7 +409,7 @@ struct Job {
   }
 
   // Finalizes hours once they are safe and otherwise parses blocks, but never
-  // more than 4 blocks per thread past the oldest unfinished one.
+  // more than kAhead blocks past the oldest unfinished one.
   void work(uint32_t index) {
     std::unique_lock<std::mutex> lock(mu);
     for (;;) {
@@ -416,7 +419,7 @@ struct Job {
         lock.unlock();
         finalize(hour);
         lock.lock();
-      } else if (next_block < nblocks && next_block < watermark + 4 * threads) {
+      } else if (next_block < nblocks && next_block < watermark + kAhead) {
         const uint32_t block = next_block++;
         lock.unlock();
         parse(block);
@@ -467,7 +470,7 @@ int main() {
     fail("open summary");
   cpu_set_t cpus{};
   sched_getaffinity(0, sizeof cpus, &cpus);
-  const uint32_t threads = forced ? std::atoi(forced) : CPU_COUNT(&cpus);
+  const uint32_t threads = forced ? std::atoi(forced) : std::min(6, CPU_COUNT(&cpus));
   if (!std::make_unique<Job>(map, bytes, kLag, fd, threads)->run()) {
     if (ftruncate(fd, 0) || lseek(fd, 0, SEEK_SET))
       fail("rewind summary");
