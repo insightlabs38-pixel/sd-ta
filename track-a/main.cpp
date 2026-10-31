@@ -334,7 +334,7 @@ struct Job {
     char *out = text.get(), label[22];
     std::snprintf(label, sizeof label, "%sT%02u:00:00Z ",
                   kDays[(hour + 18) / 24], (hour + 18) % 24);
-    auto put = [&](uint64_t v) {
+    auto put = [&](uint32_t v) {
       *out++ = ' ';
       out = std::to_chars(out, out + 20, v).ptr;
     };
@@ -352,10 +352,9 @@ struct Job {
       std::memcpy(out, label, 21);
       std::memcpy(out + 21, names.img[id], names.len[id]);
       out += 21 + names.len[id];
-      for (const uint64_t v : {uint64_t{n}, uint64_t{a[r50]}, uint64_t{a[r95]},
-                               uint64_t{a[r99]}, uint64_t{errors}})
+      for (const uint32_t v : {n, a[r50], a[r95], a[r99], errors})
         put(v);
-      put(errors ? uint64_t{errors} * 1000000 / n : 0);
+      put(errors ? uint32_t(uint64_t{errors} * 1000000 / n) : 0);
       *out++ = '\n';
     }
     const size_t length = out - text.get();

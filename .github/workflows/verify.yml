@@ -74,8 +74,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --depth=1 origin d9680bd4158eb4516bd0d8d26332be17caacf62c
-          git show d9680bd4158eb4516bd0d8d26332be17caacf62c:track-a/main.cpp > /tmp/a-prev.cpp
+          git fetch --depth=1 origin ff2073649af1fe8f2d0b33883c765e16458cdbe2
+          git show ff2073649af1fe8f2d0b33883c765e16458cdbe2:track-a/main.cpp > /tmp/a-prev.cpp
           g++ -O3 -march=x86-64-v3 -std=c++20 -DNDEBUG -pthread -static-libstdc++ -static-libgcc -o /tmp/a-prev-v3 /tmp/a-prev.cpp
           git fetch --depth=1 origin 8ec49c42ed9b2fc0e4df0bca489a1cc7ae13d4dd
           git show 8ec49c42ed9b2fc0e4df0bca489a1cc7ae13d4dd:track-a/main.cpp > /tmp/a-packed-only.cpp
@@ -84,7 +84,7 @@ jobs:
           import hashlib, os, random, statistics, subprocess, time
           env = dict(os.environ, SD_DATA_DIR='/tmp/a-full', SD_OUT_DIR='/tmp/a-out')
           expected = '495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3'
-          binaries = {'streaming-base': '/tmp/a-prev-v3', 'prior': '/tmp/a-packed-only', 'candidate': './solution'}
+          binaries = {'six-worker-base': '/tmp/a-prev-v3', 'prior': '/tmp/a-packed-only', 'candidate': './solution'}
           samples = {key: [] for key in binaries}
           rng = random.Random(20261030)
           for _ in range(31):
@@ -96,9 +96,9 @@ jobs:
                   samples[key].append(time.perf_counter() - start)
                   with open('/tmp/a-out/summary.txt', 'rb') as f:
                       assert hashlib.sha256(f.read()).hexdigest() == expected
-          old = statistics.median(samples['streaming-base'])
+          old = statistics.median(samples['six-worker-base'])
           new = statistics.median(samples['candidate'])
-          print(f'Full seed-1 31-run medians: streaming-base={old:.6f}s prior={statistics.median(samples["prior"]):.6f}s candidate={new:.6f}s ratio={new/old:.4f}', flush=True)
+          print(f'Full seed-1 31-run medians: six-worker-base={old:.6f}s prior={statistics.median(samples["prior"]):.6f}s candidate={new:.6f}s ratio={new/old:.4f}', flush=True)
           PY
       - name: Compare full-input peak RSS
         shell: bash
