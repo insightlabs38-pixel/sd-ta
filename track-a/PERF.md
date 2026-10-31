@@ -176,3 +176,10 @@
 - Direct 31-run full-input medians on four-vCPU CI: qualified six-worker champion **0.042887 s**, candidate **0.043311 s** (0.99% slower). Five-run maximum cgroup peaks **6,283,264** versus **6,602,752 bytes** (5.08% higher). Estimated K proxy approximately **1.4% lower**, even with one fewer source line and unchanged D. Rejected.
 - Local isolated microbenchmarks did not justify promoting branchy 32-byte endpoint comparisons, grammar-branch method scanning, custom decimal-pair formatting, or alternative non-CRC hashes. The isolated 32-bit formatter was slightly faster but lost end-to-end.
 - Restored the exact qualified six-worker source blob `ea7cdf2a960168dd13a729baedca7ad3b990dde6` from `f1e501c`. The CI workflow now compares future candidates directly against the verified six-worker implementation `ff20736`. Official six-core score remains outstanding.
+
+## Short-endpoint SIMD and lazy delimiter scan, October 31
+
+- Candidate `b6ce5ba` compares only the first AVX2 vector for endpoint keys shorter than 32 bytes, and loads the second delimiter vector only if the first cannot contain the endpoint terminator. Full endpoint equality remains exact.
+- Independent 200,000-case randomized endpoint comparisons passed a length-aware bytewise oracle under ASan/UBSan, including prefix and altered-length mismatches. A separate 200,000-record mixed-method/endpoint scan agreed with the previous delimiter algorithm under ASan/UBSan.
+- Local native microbenchmarks showed approximately 3-5% faster endpoint equality in the tested mixture; delimiter-scan timings were noisy and varied by short-endpoint share. These are isolated kernel measurements, not full-input gains.
+- **Pending:** official seed-1 hashes, holdout-like seeds, restricted Docker, full paired T/M/S/D and CI result. Do not integrate this candidate as a verified champion until those gates pass. The qualified six-worker source remains at `817b13e` / `ff20736`.
