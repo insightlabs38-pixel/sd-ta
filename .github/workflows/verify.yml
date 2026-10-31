@@ -77,8 +77,8 @@ jobs:
           git fetch --depth=1 origin 3bd56063faa081e6dfef77afeb99044ede01dfe5
           git show 3bd56063faa081e6dfef77afeb99044ede01dfe5:track-a/main.cpp > /tmp/a-prev.cpp
           g++ -O3 -march=x86-64-v3 -std=c++20 -DNDEBUG -pthread -static-libstdc++ -static-libgcc -o /tmp/a-prev-v3 /tmp/a-prev.cpp
-          git fetch --depth=1 origin 2c4f0807d3c1b331710ddcb3a901fe811deafce8
-          git show 2c4f0807d3c1b331710ddcb3a901fe811deafce8:track-a/main.cpp > /tmp/a-preavx.cpp
+          git fetch --depth=1 origin d16215b3dd7f9f0f540e371c56ba5e010923a03d
+          git show d16215b3dd7f9f0f540e371c56ba5e010923a03d:track-a/main.cpp > /tmp/a-preavx.cpp
           g++ -O3 -march=x86-64-v3 -std=c++20 -DNDEBUG -pthread -static-libstdc++ -static-libgcc -o /tmp/a-preavx /tmp/a-preavx.cpp
           python - <<'PY' | tee -a /tmp/summary.txt
           import hashlib, os, random, statistics, subprocess, time
@@ -147,11 +147,17 @@ jobs:
             image=sd-track-a-prev
             if [ "$label" = preavx ]; then image=sd-track-a-preavx; fi
             if [ "$label" = candidate ]; then image=sd-track-a; fi
-            echo "Measuring $label cgroup memory.peak" | tee -a /tmp/summary.txt
-            docker run --rm --network=none --read-only --memory=8g --memory-swap=8g --pids-limit=512 --tmpfs /tmp:rw,size=1g \
-              --mount type=bind,source=/tmp/a-full,target=/data,readonly \
-              --mount type=bind,source=/tmp/a-container-out,target=/out \
-              --entrypoint /bin/sh "$image" -c '/solution && cat /sys/fs/cgroup/memory.peak' | tee -a /tmp/summary.txt
+            echo "Measuring $label cgroup memory.peak across five fresh runs" | tee -a /tmp/summary.txt
+            peak=0
+            for trial in 1 2 3 4 5; do
+              current=$(docker run --rm --network=none --read-only --memory=8g --memory-swap=8g --pids-limit=512 --tmpfs /tmp:rw,size=1g \
+                --mount type=bind,source=/tmp/a-full,target=/data,readonly \
+                --mount type=bind,source=/tmp/a-container-out,target=/out \
+                --entrypoint /bin/sh "$image" -c '/solution && cat /sys/fs/cgroup/memory.peak')
+              echo "$label trial=$trial memory.peak=$current" | tee -a /tmp/summary.txt
+              if (( current > peak )); then peak=$current; fi
+            done
+            echo "$label max5=$peak" | tee -a /tmp/summary.txt
           done
       - name: Summary
         run: cat /tmp/summary.txt

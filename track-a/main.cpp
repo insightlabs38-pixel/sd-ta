@@ -141,16 +141,12 @@ struct Names {
   int lookup(const char *ep, uint32_t n, uint32_t h, Bucket *&b) {
     for (uint32_t i = h >> 16;; ++i) {
       b = buckets + (i & 511);
-      uint32_t tags[8];
-      for (uint32_t lane = 0; lane < 8; ++lane)
-        tags[lane] = __atomic_load_n(&b->tag[lane], __ATOMIC_ACQUIRE);
-      uint32_t m = _mm256_movemask_ps(_mm256_castsi256_ps(
-          _mm256_cmpeq_epi32(load(tags), _mm256_set1_epi32(h))));
-      for (; m; m &= m - 1)
-        if (same(b->id[__builtin_ctz(m)], ep, n))
-          return b->id[__builtin_ctz(m)];
-      if (!tags[7])
-        return -1;
+      for (uint32_t lane = 0; lane < 8; ++lane) {
+        const uint32_t tag = __atomic_load_n(&b->tag[lane], __ATOMIC_ACQUIRE);
+        if (tag == h && same(b->id[lane], ep, n))
+          return b->id[lane];
+        if (!tag) return -1;
+      }
     }
   }
   __attribute__((always_inline)) uint32_t find(const char *ep, uint32_t n) {
