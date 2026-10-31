@@ -66,6 +66,17 @@ uint32_t hour_index(const char *p) {
   return ((p[9] - '0') + (p[6] == '1')) * 24 +
          (p[11] - '0') * 10 + (p[12] - '0') - 18;
 }
+void sort_small(uint32_t *values, uint32_t n) {
+  for (uint32_t i = 1; i < n; ++i) {
+    const uint32_t value = values[i];
+    uint32_t j = i;
+    while (j && values[j - 1] > value) {
+      values[j] = values[j - 1];
+      --j;
+    }
+    values[j] = value;
+  }
+}
 void append_number(std::string &out, uint64_t value) {
   char buffer[24];
   const auto result = std::to_chars(buffer, buffer + sizeof(buffer), value);
@@ -233,7 +244,7 @@ int main() {
         const uint32_t r95 = (95 * n + 99) / 100 - 1;
         const uint32_t r99 = (99 * n + 99) / 100 - 1;
         if (n <= 32) {
-          std::sort(first, first + n);
+          sort_small(first, n);
         } else {
           std::nth_element(first, first + r50, first + n);
           std::nth_element(first + r50 + 1, first + r95, first + n);
