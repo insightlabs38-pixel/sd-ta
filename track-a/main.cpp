@@ -20,11 +20,14 @@
 namespace {
 constexpr uint32_t kHours = 72, kIds = 2048, kBlock = 256 << 10;
 constexpr uint32_t kStreams = 4;
-constexpr uint32_t kRunCap = kBlock / 40 + 16, kLag = 2, kNever = 1000, kKeep = 2;
+constexpr uint32_t kRunCap = kBlock / 40 + 16, kLag = 2, kNever = 1000, kKeep = 2, kAhead = 48, kPartCap = kIds * 256;  // an hour has < kIds lines
 
 struct __attribute__((packed)) Rec { uint32_t lat; uint16_t tag; };  // tag: id | error << 11
 struct Run { Rec *rec; uint32_t n; };
-struct Part { std::unique_ptr<char[]> data; size_t size = 0; };
+struct Part {  // output text of one hour; the buffer is recycled once written
+  std::unique_ptr<char[]> data;
+  size_t size = 0;
+};
 
 [[noreturn]] void fail(const char *message) {
   std::perror(message);
@@ -40,13 +43,14 @@ inline uint32_t spaces(const char *p) {
   return static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_cmpeq_epi8(load(p), _mm256_set1_epi8(' '))));
 }
 // 32 bytes with the first n (<= 32) set.
-inline __m256i first(uint32_t n) {
-  alignas(32) static const uint8_t ones[64] = {
-      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-      255, 255, 255, 255, 255, 255, 255, 255, 255, 255};
-  return load(ones + 32 - n);
-}
+struct Masks {
+  uint8_t ones[65][64];  // row k: the first k bytes of 64 set
+  constexpr Masks() : ones() {
+    for (int k = 0; k <= 64; ++k)
+      for (int i = 0; i < k; ++i) ones[k][i] = 255;
+  }
+};
+constexpr Masks kMasks;
 
 // Concurrent exact endpoint dictionary: 8-way buckets, lock-free hits, locked
 // inserts. Keys are stored zero-padded with a space after the last byte, so
@@ -61,14 +65,13 @@ struct Names {
   std::mutex mu;
 
   bool same(uint32_t id, const char *ep, uint32_t n) const {
-    const uint32_t k = n + 1;
+    const uint8_t *mask = kMasks.ones[std::min(n + 1, 64u)];
     const __m256i d0 = _mm256_xor_si256(load(ep), load(img[id]));
     const __m256i d1 = _mm256_xor_si256(load(ep + 32), load(img[id] + 32));
-    return _mm256_testz_si256(d0, first(std::min(k, 32u))) &&
-           _mm256_testz_si256(d1, first(std::min(std::max(k, 32u) - 32, 32u))) &&
+    return _mm256_testz_si256(d0, load(mask)) && _mm256_testz_si256(d1, load(mask + 32)) &&
            (n < 64 || (len[id] == n && !std::memcmp(img[id] + 64, ep + 64, n - 64)));
   }
-  uint32_t find(const char *ep, uint32_t n) {
+  __attribute__((always_inline)) uint32_t find(const char *ep, uint32_t n) {
     const uint64_t keep = n < 8 ? n * 8 : 64;
     const uint64_t x = _bzhi_u64(load64(ep), keep), y = _bzhi_u64(load64(ep + std::max(n, 8u) - 8), keep);
     const uint32_t h = static_cast<uint32_t>(_mm_crc32_u64(_mm_crc32_u64(n, x), y)) | 1;
@@ -150,7 +153,8 @@ void select(uint32_t *a, uint32_t lo, uint32_t hi, uint32_t k) {
 struct Scratch {
   uint64_t count[kIds];  // low 32 bits requests, high 32 bits 5xx
   uint32_t pos[kIds];
-  std::vector<uint32_t> lat;
+  std::vector<uint32_t> lat;  // one hour's latencies grouped by endpoint
+  Scratch() { lat.reserve(1 << 17); }
   std::vector<uint16_t> order;
 };
 
@@ -162,9 +166,11 @@ struct Job {
   Names names;
   std::mutex mu, out_mu;
   std::condition_variable cv, out_cv;
-  std::atomic<uint32_t> next_block {0};
+  uint32_t next_block = 0;
   std::vector<Run> runs[kHours];
   std::vector<Rec *> pool;
+  std::vector<Part> spare;  // written output buffers
+  std::vector<std::unique_ptr<Scratch>> scratch;  // few hours finalize at once
   std::vector<uint8_t> done, block_max;
   uint32_t watermark = 0, prefix_max = 0, registered = 0, next_hour = 0;
   bool bad = false;
@@ -296,7 +302,9 @@ struct Job {
     for (const Run &r : mine)
       for (uint32_t i = 0; i < r.n; ++i) s.lat[s.pos[r.rec[i].tag & (kIds - 1)]++] = r.rec[i].lat;
     Part part;
-    part.data.reset(new char[bytes]);
+    { std::lock_guard<std::mutex> lock(mu);
+      if (!spare.empty()) { part = std::move(spare.back()); spare.pop_back(); } }
+    if (!part.data) part.data.reset(new char[kPartCap]);
     char *out = part.data.get();
     char label[22];
     static const char *const days[4] = {"2026-10-30", "2026-10-31", "2026-11-01", "2026-11-02"};
@@ -352,6 +360,8 @@ struct Job {
         off += static_cast<size_t>(w);
       }
       end[h + 1] = end[h] + static_cast<off_t>(part.size);
+      { std::lock_guard<std::mutex> lock(mu);
+        spare.push_back(std::move(part)); }
       sync_file_range(fd, end[h], end[h + 1] - end[h], SYNC_FILE_RANGE_WRITE);
       if (h >= kKeep) posix_fadvise(fd, 0, end[h - kKeep + 1], POSIX_FADV_DONTNEED);
     }
@@ -359,19 +369,31 @@ struct Job {
 
   bool claimable() const { return next_hour < kHours && (registered == nblocks || next_hour + lag <= prefix_max); }
 
+  // Finalizes hours once they are safe and otherwise parses blocks, but never
+  // more than kAhead blocks past the oldest unfinished one.
   void work() {
-    auto s = std::make_unique<Scratch>();
+    std::unique_lock<std::mutex> lock(mu);
     for (;;) {
-      int hour = -1;
-      { std::lock_guard<std::mutex> lock(mu);
-        if (claimable()) hour = static_cast<int>(next_hour++);
-        if (next_hour >= kHours) cv.notify_all(); }
-      if (hour >= 0) { finalize(static_cast<uint32_t>(hour), *s); continue; }
-      const uint32_t block = next_block.fetch_add(1);
-      if (block < nblocks) { parse(block); continue; }
-      std::unique_lock<std::mutex> lock(mu);
-      cv.wait(lock, [&] { return next_hour >= kHours || claimable(); });
-      if (next_hour >= kHours) return;
+      if (claimable()) {
+        const uint32_t hour = next_hour++;
+        if (next_hour >= kHours) cv.notify_all();
+        if (scratch.empty()) scratch.push_back(std::make_unique<Scratch>());
+        std::unique_ptr<Scratch> s = std::move(scratch.back());
+        scratch.pop_back();
+        lock.unlock();
+        finalize(hour, *s);
+        lock.lock();
+        scratch.push_back(std::move(s));
+      } else if (next_block < nblocks && next_block < watermark + kAhead) {
+        const uint32_t block = next_block++;
+        lock.unlock();
+        parse(block);
+        lock.lock();
+      } else if (next_hour >= kHours) {
+        return;
+      } else {
+        cv.wait(lock);
+      }
     }
   }
   bool run() {
