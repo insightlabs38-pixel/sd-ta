@@ -62,6 +62,12 @@ __attribute__((always_inline)) inline uint32_t intern(std::string_view name, std
   dictionary[pos] = {hash, id + 1};
   return id;
 }
+void discard_pages(const char *begin, const char *end) {
+  constexpr uintptr_t mask = 4095;
+  const uintptr_t lo = (reinterpret_cast<uintptr_t>(begin) + mask) & ~mask;
+  const uintptr_t hi = reinterpret_cast<uintptr_t>(end) & ~mask;
+  if (hi > lo) madvise(reinterpret_cast<void *>(lo), hi - lo, MADV_DONTNEED);
+}
 uint32_t hour_index(const char *p) {
   const uint32_t day = (p[8] - '0') * 10 + (p[9] - '0');
   const uint32_t hour = (p[11] - '0') * 10 + (p[12] - '0');
@@ -92,6 +98,7 @@ struct Worker {
   void parse(const char *p, const char *end) {
     names.reserve(kEndpoints);
     storage.reserve(kEndpoints);
+    const char *release = p;
     records.reserve(static_cast<size_t>(end - p) / 70 + 128);
     while (p < end) {
       const char *const line = p;
@@ -116,7 +123,12 @@ struct Worker {
         std::memcpy(hours[hour].data(), line, 13);
       }
       records.push_back({key, latency});
+      if (p - release >= 4 * 1024 * 1024) {
+        discard_pages(release, p);
+        release = p;
+      }
     }
+    discard_pages(release, end);
   }
 };
 } // namespace
