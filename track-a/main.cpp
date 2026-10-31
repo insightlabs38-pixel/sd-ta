@@ -128,11 +128,6 @@ struct Names {
   SpinLock mu;
 
   bool same(uint32_t id, const char *ep, uint32_t n) const {
-    if (n < 32) {
-      const uint32_t match = _mm256_movemask_epi8(
-          _mm256_cmpeq_epi8(load(ep), load(img[id])));
-      return !_bzhi_u32(~match, n + 1);
-    }
     auto eq = [&](int i) {
       return uint64_t(uint32_t(_mm256_movemask_epi8(
                  _mm256_cmpeq_epi8(load(ep + i), load(img[id] + i)))))
@@ -242,16 +237,10 @@ struct Job {
   line(const char *p, Rec *(&wp)[kHours], Rec *(&bp)[kHours]) {
     const uint32_t hour = (p[9] + (p[6] & 1)) * 24 + p[11] * 10 + p[12] - 1698;
     const char *q = p + 28;
-    uint32_t m = spaces(q);
-    const uint32_t k1 = __builtin_ctz(m);
+    uint64_t m = spaces(q) | uint64_t{spaces(q + 32)} << 32;
+    const uint32_t k1 = __builtin_ctzll(m);
     m &= m - 1;
-    uint32_t k2;
-    if (m)
-      k2 = __builtin_ctz(m);
-    else if ((m = spaces(q + 32)))
-      k2 = 32 + __builtin_ctz(m);
-    else
-      k2 = far_space(q);
+    const uint32_t k2 = m ? __builtin_ctzll(m) : far_space(q);
     const uint32_t id = names.find(q + k1 + 1, k2 - k1 - 1);
     const char *s = q + k2 + 1;
     const uint32_t error = *s == '5';

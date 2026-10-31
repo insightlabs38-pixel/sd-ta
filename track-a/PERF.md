@@ -183,3 +183,10 @@
 - Independent 200,000-case randomized endpoint comparisons passed a length-aware bytewise oracle under ASan/UBSan, including prefix and altered-length mismatches. A separate 200,000-record mixed-method/endpoint scan agreed with the previous delimiter algorithm under ASan/UBSan.
 - Local native microbenchmarks showed approximately 3-5% faster endpoint equality in the tested mixture; delimiter-scan timings were noisy and varied by short-endpoint share. These are isolated kernel measurements, not full-input gains.
 - **Pending:** official seed-1 hashes, holdout-like seeds, restricted Docker, full paired T/M/S/D and CI result. Do not integrate this candidate as a verified champion until those gates pass. The qualified six-worker source remains at `817b13e` / `ff20736`.
+
+## Short-endpoint SIMD CI decision, October 31
+
+- [CI 41208670422](https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41208670422) passed official seed-1 tiny/sample/full hashes, seed-2/3 differential, adversarial ordering, ASan/UBSan, TSan and restricted offline Docker for candidate `b6ce5ba`.
+- Direct randomized 31-run full-input medians: six-worker champion `ff20736` **0.044322 s**, packed-only control **0.044519 s**, SIMD/lazy-scan candidate **0.049159 s**, **10.91% slower** than champion.
+- Five fresh Docker cgroup memory.peak samples: champion 15,233,024 / 5,906,432 / 5,890,048 / 5,914,624 / 6,881,280 bytes; candidate 5,738,496 / 5,541,888 / 6,631,424 / 6,721,536 / 5,562,368 bytes. Champion's first-run 15.2 MB is an outlier; median 5.91 MB versus candidate 5.74 MB. Candidate loses estimated K by roughly 5%, even before any source penalty.
+- **Rejected** SIMD/lazy-scan candidate; restored exact six-worker source blob `ea7cdf2a960168dd13a729baedca7ad3b990dde6`. The candidate is recoverable at `b6ce5ba`. Official six-P-core scoring remains outstanding.
