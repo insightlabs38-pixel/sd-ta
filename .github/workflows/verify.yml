@@ -49,12 +49,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --depth=1 origin 0c861331cf8ac4493d1e848a8c459cb8209db789
-          git show 0c861331cf8ac4493d1e848a8c459cb8209db789:track-a/main.cpp > /tmp/a-prev.cpp
+          git fetch --depth=1 origin bcbe7b64c540bc8680284bd978865c423201966e
+          git show bcbe7b64c540bc8680284bd978865c423201966e:track-a/main.cpp > /tmp/a-prev.cpp
           g++ -O3 -std=c++20 -DNDEBUG -pthread -static-libstdc++ -static-libgcc -o /tmp/a-prev /tmp/a-prev.cpp
           g++ -O3 -march=x86-64-v3 -std=c++20 -DNDEBUG -pthread -static-libstdc++ -static-libgcc -o /tmp/a-prev-v3 /tmp/a-prev.cpp
-          git fetch --depth=1 origin bcbe7b64c540bc8680284bd978865c423201966e
-          git show bcbe7b64c540bc8680284bd978865c423201966e:track-a/main.cpp > /tmp/a-drop.cpp
+          git fetch --depth=1 origin d53c5078a4dbac52eae4ebab08eed58fb0d639f0
+          git show d53c5078a4dbac52eae4ebab08eed58fb0d639f0:track-a/main.cpp > /tmp/a-drop.cpp
           g++ -O3 -march=x86-64-v3 -std=c++20 -DNDEBUG -pthread -static-libstdc++ -static-libgcc -o /tmp/a-drop /tmp/a-drop.cpp
           python - <<'PY'
           import hashlib, os, random, statistics, subprocess, time
@@ -74,7 +74,7 @@ jobs:
                       assert hashlib.sha256(f.read()).hexdigest() == expected
           old = statistics.median(samples['champion-v3'])
           new = statistics.median(samples['candidate'])
-          print(f'Full seed-1 31-run medians: champion-generic={statistics.median(samples["champion"]):.6f}s champion-v3={old:.6f}s sparse={statistics.median(samples["drop"]):.6f}s candidate={new:.6f}s ratio={new/old:.4f}', flush=True)
+          print(f'Full seed-1 31-run medians: champion-generic={statistics.median(samples["champion"]):.6f}s champion-v3={old:.6f}s six-byte={statistics.median(samples["drop"]):.6f}s candidate={new:.6f}s ratio={new/old:.4f}', flush=True)
           PY
       - name: Compare full-input peak RSS
         shell: bash
