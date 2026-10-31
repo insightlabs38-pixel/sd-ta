@@ -156,6 +156,7 @@ int main() {
   std::vector<Group> groups(kGroups);
   std::array<std::array<char, 13>, kHours> hours {};
   std::vector<std::vector<uint32_t>> remaps(kParseWorkers);
+  std::array<std::vector<uint32_t>, kParseWorkers> cursors;
   for (uint32_t w = 0; w < kParseWorkers; ++w) {
     Worker &worker = workers[w];
     remaps[w].reserve(worker.names.size());
@@ -163,33 +164,26 @@ int main() {
       const uint32_t id = intern(name, dictionary, names);
       remaps[w].push_back(id);
     }
+    cursors[w].assign(kGroups, 0);
     for (uint32_t hour = 0; hour < kHours; ++hour) {
       if (worker.seen[hour]) std::memcpy(hours[hour].data(), worker.hours[hour].data(), 13);
       for (uint32_t id = 0; id < worker.names.size(); ++id) {
         const WorkerGroup &src = worker.groups[(hour << kLocalBits) | id];
-        Group &dst = groups[hour * kEndpoints + remaps[w][id]];
+        const uint32_t key = hour * kEndpoints + remaps[w][id];
+        Group &dst = groups[key];
         dst.count += src.count;
         dst.errors += src.errors;
+        cursors[w][key] = src.count;
       }
     }
+    worker.groups.clear();
+    worker.groups.shrink_to_fit();
   }
 
   uint32_t prefix = 0;
   for (Group &group : groups) {
     group.cursor = prefix;
     prefix += group.count;
-  }
-  std::array<std::vector<uint32_t>, kParseWorkers> cursors;
-  for (uint32_t w = 0; w < kParseWorkers; ++w) {
-    cursors[w].assign(kGroups, 0);
-    for (uint32_t hour = 0; hour < kHours; ++hour) {
-      for (uint32_t id = 0; id < workers[w].names.size(); ++id) {
-        const uint32_t key = hour * kEndpoints + remaps[w][id];
-        cursors[w][key] = workers[w].groups[(hour << kLocalBits) | id].count;
-      }
-    }
-    workers[w].groups.clear();
-    workers[w].groups.shrink_to_fit();
   }
   std::vector<uint32_t> latencies(prefix);
   for (uint32_t key = 0; key < kGroups; ++key) {
