@@ -25,8 +25,9 @@ constexpr uint32_t kParseWorkers = 5;
 constexpr uint32_t kOutputWorkers = 5;
 constexpr uint8_t kMethodSkip[26] = {0, 0, 0, 7, 0, 0, 4, 5, 0, 0, 0, 0, 0, 0, 8};
 
-struct __attribute__((packed)) Record { uint32_t group : 24; uint32_t latency; };
-static_assert(sizeof(Record) == 7);
+struct __attribute__((packed)) Record { uint16_t id; uint32_t latency; };
+static_assert(sizeof(Record) == 6);
+struct Segment { uint32_t begin; uint8_t hour; };
 struct Group { uint32_t count = 0, errors = 0, cursor = 0; };
 struct WorkerGroup { uint32_t count = 0; };
 struct Slot { uint32_t hash = 0, id_plus_one = 0; };
@@ -95,6 +96,7 @@ struct Worker {
   std::array<std::array<char, 13>, kHours> hours {};
   std::array<uint8_t, kHours> seen {};
   std::vector<Record> records;
+  std::vector<Segment> segments;
   std::vector<uint32_t> error_keys;
 
   void parse(const char *p, const char *end) {
@@ -119,12 +121,15 @@ struct Worker {
         seen[hour] = 1;
         std::memcpy(hours[hour].data(), line, 13);
       }
-      records.push_back({key, latency});
+      if (segments.empty() || segments.back().hour != hour)
+        segments.push_back({static_cast<uint32_t>(records.size()), static_cast<uint8_t>(hour)});
+      records.push_back({static_cast<uint16_t>(id), latency});
       if (error) error_keys.push_back(key);
     }
-    for (const Record &record : records) {
-      WorkerGroup &group = groups[record.group];
-      ++group.count;
+    for (size_t i = 0; i < segments.size(); ++i) {
+      const uint32_t base = static_cast<uint32_t>(segments[i].hour) << kLocalBits;
+      const size_t stop = i + 1 < segments.size() ? segments[i + 1].begin : records.size();
+      for (size_t j = segments[i].begin; j < stop; ++j) ++groups[base | records[j].id].count;
     }
   }
 };
@@ -210,10 +215,15 @@ int main() {
   }
   auto scatter = [&](uint32_t w) {
     std::vector<uint32_t> &cursor = cursors[w];
-    for (const Record &record : workers[w].records) {
-      const uint32_t key = (record.group >> kLocalBits) * kEndpoints +
-                           remaps[w][record.group & (kLocalStride - 1)];
-      latencies[cursor[key]++] = record.latency;
+    const auto &worker = workers[w];
+    for (size_t i = 0; i < worker.segments.size(); ++i) {
+      const uint32_t base = static_cast<uint32_t>(worker.segments[i].hour) * kEndpoints;
+      const size_t stop = i + 1 < worker.segments.size() ? worker.segments[i + 1].begin : worker.records.size();
+      for (size_t j = worker.segments[i].begin; j < stop; ++j) {
+        const Record &record = worker.records[j];
+        const uint32_t key = base + remaps[w][record.id];
+        latencies[cursor[key]++] = record.latency;
+      }
     }
   };
   std::array<std::thread, kParseWorkers - 1> scatter_threads;
