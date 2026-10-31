@@ -469,6 +469,7 @@ struct Job {
       seen += n != 0;
     }
     std::vector<int32_t> lat = take(latbufs);
+    lat.reserve(1 << 17);
     lat.resize(total + 16);
     for (const auto &[rec, n] : mine)
       for (uint32_t i = 0; i < n; ++i)

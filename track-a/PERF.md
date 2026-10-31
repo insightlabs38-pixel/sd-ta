@@ -248,3 +248,11 @@
 - Neutral, not kept: capping concurrent finalizations (3/5), a window on out-of-order hours (5/8), 128/512 KiB blocks (128 KiB +10% CPU), 2/3/4/6 interleaved streams, `-mtune`/`-funroll-loops`/`-O2`, skipping writeback calls for the last hour, fully unrolled stream loop (simulated mispredicts -40%, wall unchanged).
 - Output writeback syscalls (`write` + `sync_file_range` + `fadvise`) cost about 20 ms CPU of 115 but keep peak memory ~10 MB lower; O_DIRECT was not tried because a slow `/out` device would make every write synchronous.
 - Source: about 565 canonical code lines (clang-format LLVM, comments/blanks removed) versus 440 for `961cf36`; the CPU saving is worth roughly 25x the S penalty in K.
+
+## Latency vector reserve experiment — October 31
+
+- Candidate `7cc853b` removed the 131072-element reserve before per-hour `lat.resize(total + 16)`; the 16-slot selection padding and output semantics were unchanged.
+- [CI 41241963933](https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41241963933) passed seed-1 official hashes, seed-2/3 reference differential, disorder, ASan/UBSan, TSan, and offline Docker.
+- CI 31-run full-input candidate median 0.032782 s, compared to older six-worker base 0.039465 s and packed-only 0.042694 s; this run did not pair the candidate with the immediate PR #2 champion, so no speedup versus that champion is established.
+- Five-run candidate cgroup peak ranged 7,999,488–10,838,016 bytes, versus older six-worker base 6,111,232–9,515,008 bytes. A separate local 12-vector RSS check found no meaningful committed-memory reduction from dropping reserve (3,776 versus 3,780 KiB).
+- **Not promoted:** reserve commits virtual address space, not necessarily resident pages; evidence does not establish a complete-K improvement over the current qualified champion. Restore exact source blob `24926c0187974683c9e96ebac46d48073d5907d5` and preserve the candidate in Git history.
