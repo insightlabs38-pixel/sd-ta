@@ -612,10 +612,11 @@ int main() {
     fail("open summary");
   cpu_set_t cpus{};
   sched_getaffinity(0, sizeof cpus, &cpus);
-  const uint32_t threads = forced ? std::atoi(forced) : std::min(6, CPU_COUNT(&cpus));
-  if (!std::make_unique<Job>(map, bytes, kLag, fd, threads)->run()) {
+  const uint32_t threads = forced ? std::atoi(forced) : std::min(16, CPU_COUNT(&cpus));
+  if (!(new Job(map, bytes, kLag, fd, threads))->run()) {
     if (ftruncate(fd, 0) || lseek(fd, 0, SEEK_SET))
       fail("rewind summary");
-    std::make_unique<Job>(map, bytes, kNever, fd, threads)->run();
+    (new Job(map, bytes, kNever, fd, threads))->run();
   }
+  _exit(0); // the kernel reclaims everything faster than free() does
 }
