@@ -52,11 +52,14 @@ jobs:
           git fetch --depth=1 origin 5542976336d1f088973ff7a09a85d83bd977bd9b
           git show 5542976336d1f088973ff7a09a85d83bd977bd9b:track-a/main.cpp > /tmp/a-prev.cpp
           g++ -O3 -std=c++20 -DNDEBUG -pthread -static-libstdc++ -static-libgcc -o /tmp/a-prev /tmp/a-prev.cpp
+          git fetch --depth=1 origin 08b5dc86d1552b652234597e590c3cf9cf97da23
+          git show 08b5dc86d1552b652234597e590c3cf9cf97da23:track-a/main.cpp > /tmp/a-drop.cpp
+          g++ -O3 -std=c++20 -DNDEBUG -pthread -static-libstdc++ -static-libgcc -o /tmp/a-drop /tmp/a-drop.cpp
           python - <<'PY'
           import hashlib, os, random, statistics, subprocess, time
           env = dict(os.environ, SD_DATA_DIR='/tmp/a-full', SD_OUT_DIR='/tmp/a-out')
           expected = '495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3'
-          binaries = {'champion': '/tmp/a-prev', 'candidate': './solution'}
+          binaries = {'champion': '/tmp/a-prev', 'drop': '/tmp/a-drop', 'candidate': './solution'}
           samples = {key: [] for key in binaries}
           rng = random.Random(20261030)
           for _ in range(13):
@@ -70,15 +73,16 @@ jobs:
                       assert hashlib.sha256(f.read()).hexdigest() == expected
           old = statistics.median(samples['champion'])
           new = statistics.median(samples['candidate'])
-          print(f'Full seed-1 13-run medians: champion={old:.6f}s candidate={new:.6f}s ratio={new/old:.4f}', flush=True)
+          print(f'Full seed-1 13-run medians: champion={old:.6f}s drop={statistics.median(samples["drop"]):.6f}s candidate={new:.6f}s ratio={new/old:.4f}', flush=True)
           PY
       - name: Compare full-input peak RSS
         shell: bash
         run: |
           set -euo pipefail
           SD_DATA_DIR=/tmp/a-full SD_OUT_DIR=/tmp/a-out /usr/bin/time -f 'champion RSS KiB=%M' -o /tmp/a-rss-prev /tmp/a-prev
+          SD_DATA_DIR=/tmp/a-full SD_OUT_DIR=/tmp/a-out /usr/bin/time -f 'drop RSS KiB=%M' -o /tmp/a-rss-drop /tmp/a-drop
           SD_DATA_DIR=/tmp/a-full SD_OUT_DIR=/tmp/a-out /usr/bin/time -f 'candidate RSS KiB=%M' -o /tmp/a-rss-new ./solution
-          cat /tmp/a-rss-prev /tmp/a-rss-new
+          cat /tmp/a-rss-prev /tmp/a-rss-drop /tmp/a-rss-new
       - name: Validate Docker allowlist and offline sandbox
         shell: bash
         run: |
@@ -110,8 +114,13 @@ jobs:
           cp /tmp/a-prev.cpp /tmp/a-prev-image/main.cpp
           cp track-a/Dockerfile /tmp/a-prev-image/Dockerfile
           docker build --network=none --pull=false -t sd-track-a-prev -f /tmp/a-prev-image/Dockerfile /tmp/a-prev-image
-          for label in champion candidate; do
+          mkdir -p /tmp/a-drop-image
+          cp /tmp/a-drop.cpp /tmp/a-drop-image/main.cpp
+          cp track-a/Dockerfile /tmp/a-drop-image/Dockerfile
+          docker build --network=none --pull=false -t sd-track-a-drop -f /tmp/a-drop-image/Dockerfile /tmp/a-drop-image
+          for label in champion drop candidate; do
             image=sd-track-a-prev
+            if [ "$label" = drop ]; then image=sd-track-a-drop; fi
             if [ "$label" = candidate ]; then image=sd-track-a; fi
             echo "Measuring $label cgroup memory.peak"
             docker run --rm --network=none --read-only --memory=8g --memory-swap=8g --pids-limit=512 --tmpfs /tmp:rw,size=1g \
