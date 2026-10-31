@@ -1,8 +1,12 @@
+// Track A: per-hour, per-endpoint request counts, p50/p95/p99 and 5xx rates.
+//
+// The log is nearly time-ordered, so its blocks are parsed into per-hour runs
+// and an hour is finalized as soon as the finished prefix of the file has moved
+// kLag hours past it. A late line that breaks this is detected when its block
+// is registered and the whole run is repeated without early finalization.
 #include <algorithm>
-#include <atomic>
 #include <charconv>
 #include <condition_variable>
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -12,110 +16,42 @@
 #include <mutex>
 #include <sched.h>
 #include <sys/mman.h>
-#include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
 
 namespace {
-constexpr uint32_t kHours = 72, kIds = 2048, kBlock = 256 << 10;
-constexpr uint32_t kStreams = 4;
-constexpr uint32_t kRunCap = kBlock / 40 + 16, kLag = 2, kNever = 1000, kKeep = 2, kAhead = 48, kPartCap = kIds * 256;  // an hour has < kIds lines
+constexpr uint32_t kHours = 72, kIds = 2048, kBlock = 256 << 10, kStreams = 4;
+constexpr uint32_t kLag = 2, kNever = 1000, kAhead = 48, kKeep = 2;
+constexpr uint32_t kRunCap = kBlock / 40 + 16, kPartCap = kIds * 256;
+const char *const kDays[] = {"2026-10-30", "2026-10-31", "2026-11-01", "2026-11-02"};
 
-struct __attribute__((packed)) Rec { uint32_t lat; uint16_t tag; };  // tag: id | error << 11
-struct Run { Rec *rec; uint32_t n; };
-struct Part {  // output text of one hour; the buffer is recycled once written
-  std::unique_ptr<char[]> data;
-  size_t size = 0;
-};
+struct __attribute__((packed)) Rec { uint32_t lat; uint16_t tag; };  // tag: id | 5xx << 11
+using Run = std::pair<Rec *, uint32_t>;
+using Part = std::pair<std::unique_ptr<char[]>, size_t>;  // output text, its length
 
-[[noreturn]] void fail(const char *message) {
-  std::perror(message);
-  std::exit(1);
+[[noreturn]] void fail(const char *what) { std::perror(what); std::exit(1); }
+__m256i load(const void *p) { return _mm256_loadu_si256(static_cast<const __m256i *>(p)); }
+uint64_t load64(const void *p) { uint64_t v; std::memcpy(&v, p, 8); return v; }
+uint32_t spaces(const char *p) {
+  return _mm256_movemask_epi8(_mm256_cmpeq_epi8(load(p), _mm256_set1_epi8(' ')));
 }
-inline __m256i load(const void *p) { return _mm256_loadu_si256(static_cast<const __m256i *>(p)); }
-inline uint64_t load64(const void *p) {
-  uint64_t v;
-  std::memcpy(&v, p, 8);
-  return v;
+// Index of the first space at or after q + 64.
+uint32_t far_space(const char *q) {
+  uint32_t k = 64, m;
+  while (!(m = spaces(q + k))) k += 32;
+  return k + __builtin_ctz(m);
 }
-inline uint32_t spaces(const char *p) {
-  return static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_cmpeq_epi8(load(p), _mm256_set1_epi8(' '))));
-}
-// 32 bytes with the first n (<= 32) set.
-struct Masks {
-  uint8_t ones[65][64];  // row k: the first k bytes of 64 set
-  constexpr Masks() : ones() {
-    for (int k = 0; k <= 64; ++k)
-      for (int i = 0; i < k; ++i) ones[k][i] = 255;
-  }
-};
-constexpr Masks kMasks;
-
-// Concurrent exact endpoint dictionary: 8-way buckets, lock-free hits, locked
-// inserts. Keys are stored zero-padded with a space after the last byte, so
-// comparing n + 1 bytes also proves equal length.
-struct Bucket { uint32_t tag[8]; uint16_t id[8]; };
-struct Names {
-  alignas(64) Bucket buckets[512] {};
-  alignas(64) char img[kIds][128] {};
-  uint32_t len[kIds] {};
-  uint32_t size = 0;
-  std::vector<uint16_t> sorted;
-  std::mutex mu;
-
-  bool same(uint32_t id, const char *ep, uint32_t n) const {
-    const uint8_t *mask = kMasks.ones[std::min(n + 1, 64u)];
-    const __m256i d0 = _mm256_xor_si256(load(ep), load(img[id]));
-    const __m256i d1 = _mm256_xor_si256(load(ep + 32), load(img[id] + 32));
-    return _mm256_testz_si256(d0, load(mask)) && _mm256_testz_si256(d1, load(mask + 32)) &&
-           (n < 64 || (len[id] == n && !std::memcmp(img[id] + 64, ep + 64, n - 64)));
-  }
-  __attribute__((always_inline)) uint32_t find(const char *ep, uint32_t n) {
-    const uint64_t keep = n < 8 ? n * 8 : 64;
-    const uint64_t x = _bzhi_u64(load64(ep), keep), y = _bzhi_u64(load64(ep + std::max(n, 8u) - 8), keep);
-    const uint32_t h = static_cast<uint32_t>(_mm_crc32_u64(_mm_crc32_u64(n, x), y)) | 1;
-    for (uint32_t i = h >> 16;; ++i) {
-      const Bucket &k = buckets[i & 511];
-      uint32_t m = static_cast<uint32_t>(_mm256_movemask_ps(_mm256_castsi256_ps(
-          _mm256_cmpeq_epi32(load(k.tag), _mm256_set1_epi32(static_cast<int>(h))))));
-      for (; m; m &= m - 1)
-        if (same(k.id[__builtin_ctz(m)], ep, n)) return k.id[__builtin_ctz(m)];
-      if (!k.tag[7]) return insert(ep, n, h);
-    }
-  }
-  uint32_t insert(const char *ep, uint32_t n, uint32_t h) {
-    std::lock_guard<std::mutex> lock(mu);
-    for (uint32_t i = h >> 16;; ++i) {
-      Bucket &k = buckets[i & 511];
-      uint32_t slot = 0;
-      for (; slot < 8 && k.tag[slot]; ++slot)
-        if (k.tag[slot] == h && same(k.id[slot], ep, n)) return k.id[slot];
-      if (slot == 8) continue;
-      const uint32_t id = size++;
-      if (id >= kIds) fail("too many endpoints");
-      std::memcpy(img[id], ep, n);
-      img[id][n] = ' ';
-      len[id] = n;
-      sorted.insert(std::lower_bound(sorted.begin(), sorted.end(), id,
-                                     [&](uint32_t x, uint32_t y) { return std::memcmp(img[x], img[y], 128) < 0; }),
-                    static_cast<uint16_t>(id));
-      k.id[slot] = static_cast<uint16_t>(id);
-      __atomic_store_n(&k.tag[slot], h, __ATOMIC_RELEASE);
-      return id;
-    }
-  }
-};
-
-uint32_t hour_index(const char *p) {
-  return ((p[9] - '0') + (p[6] == '1')) * 24 + (p[11] - '0') * 10 + (p[12] - '0') - 18;
+// Bytes 0..31 below k are set.
+__m256i below(uint32_t k) {
+  const __m256i iota = _mm256_setr_epi64x(0x0706050403020100, 0x0f0e0d0c0b0a0908, 0x1716151413121110, 0x1f1e1d1c1b1a1918);
+  return _mm256_cmpgt_epi8(_mm256_set1_epi8(static_cast<char>(k)), iota);
 }
 uint64_t digits8(uint64_t v) {
   v = (v & 0x0F0F0F0F0F0F0F0F) * 2561 >> 8;
   v = (v & 0x00FF00FF00FF00FF) * 6553601 >> 16;
   return (v & 0x0000FFFF0000FFFF) * 42949672960001 >> 32;
 }
-void append(char *&out, uint64_t value) { out = std::to_chars(out, out + 20, value).ptr; }
 
 // Places the k-th smallest of a[lo, hi) at a[k], smaller values before it and
 // larger ones after (branchless Lomuto partitions; ranges <= 16 are sorted).
@@ -124,23 +60,19 @@ void select(uint32_t *a, uint32_t lo, uint32_t hi, uint32_t k) {
     if (depth > 48) return std::nth_element(a + lo, a + k, a + hi);
     const uint32_t x = a[lo], y = a[lo + (hi - lo) / 2], z = a[hi - 1];
     const uint32_t pivot = std::max(std::min(x, y), std::min(std::max(x, y), z));
-    uint32_t j = lo;
-    for (uint32_t i = lo; i < hi; ++i) {
-      const uint32_t v = a[i];
-      a[i] = a[j];
-      a[j] = v;
-      j += v < pivot;
-    }
-    if (j == lo) {  // the pivot is the minimum: split off its duplicates
+    auto split = [&](auto before) {
+      uint32_t j = lo;
       for (uint32_t i = lo; i < hi; ++i) {
         const uint32_t v = a[i];
         a[i] = a[j];
         a[j] = v;
-        j += v == pivot;
+        j += before(v);
       }
-      if (k < j) return;
-    }
-    if (k < j) hi = j; else lo = j;
+      return j;
+    };
+    uint32_t j = split([&](uint32_t v) { return v < pivot; });
+    if (j == lo && k < (j = split([&](uint32_t v) { return v == pivot; }))) return;  // all duplicates
+    (k < j ? hi : lo) = j;
   }
   for (uint32_t i = lo + 1; i < hi; ++i) {
     const uint32_t v = a[i];
@@ -150,12 +82,61 @@ void select(uint32_t *a, uint32_t lo, uint32_t hi, uint32_t k) {
   }
 }
 
-struct Scratch {
-  uint64_t count[kIds];  // low 32 bits requests, high 32 bits 5xx
-  uint32_t pos[kIds];
-  std::vector<uint32_t> lat;  // one hour's latencies grouped by endpoint
-  Scratch() { lat.reserve(1 << 17); }
-  std::vector<uint16_t> order;
+// Concurrent exact endpoint dictionary: 8-way buckets, lock-free hits, locked
+// inserts published by a release store of the tag. Keys are stored zero-padded
+// with a space after the last byte, so comparing n + 1 bytes proves equal length.
+struct Names {
+  struct alignas(64) Bucket { uint32_t tag[8]; uint16_t id[8]; };
+  Bucket buckets[512] {};
+  alignas(64) char img[kIds][128] {};
+  uint32_t len[kIds] {}, size = 0;
+  std::vector<uint16_t> sorted;  // ids in byte order of their names
+  std::mutex mu;
+
+  bool same(uint32_t id, const char *ep, uint32_t n) const {
+    const uint32_t k = n + 1;
+    const __m256i d0 = _mm256_xor_si256(load(ep), load(img[id]));
+    const __m256i d1 = _mm256_xor_si256(load(ep + 32), load(img[id] + 32));
+    return _mm256_testz_si256(d0, below(std::min(k, 32u))) &&
+           _mm256_testz_si256(d1, below(std::min(std::max(k, 32u) - 32, 32u))) &&
+           (n < 64 || (len[id] == n && !std::memcmp(img[id] + 64, ep + 64, n - 64)));
+  }
+  // The id of the key, or -1 with b set to the bucket it belongs in.
+  int lookup(const char *ep, uint32_t n, uint32_t h, Bucket *&b) {
+    for (uint32_t i = h >> 16;; ++i) {
+      b = buckets + (i & 511);
+      uint32_t m = _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpeq_epi32(load(b->tag), _mm256_set1_epi32(h))));
+      for (; m; m &= m - 1)
+        if (same(b->id[__builtin_ctz(m)], ep, n)) return b->id[__builtin_ctz(m)];
+      if (!b->tag[7]) return -1;
+    }
+  }
+  __attribute__((always_inline)) uint32_t find(const char *ep, uint32_t n) {
+    const uint64_t keep = n < 8 ? n * 8 : 64;
+    const uint64_t x = _bzhi_u64(load64(ep), keep), y = _bzhi_u64(load64(ep + std::max(n, 8u) - 8), keep);
+    const uint32_t h = _mm_crc32_u64(_mm_crc32_u64(n, x), y) | 1;
+    Bucket *b;
+    const int id = lookup(ep, n, h, b);
+    return id >= 0 ? id : add(ep, n, h);
+  }
+  uint32_t add(const char *ep, uint32_t n, uint32_t h) {
+    std::lock_guard<std::mutex> lock(mu);
+    Bucket *b;
+    if (const int found = lookup(ep, n, h, b); found >= 0) return found;
+    const uint32_t id = size++;
+    uint32_t slot = 0;
+    while (b->tag[slot]) ++slot;
+    if (id >= kIds) fail("too many endpoints");
+    std::memcpy(img[id], ep, n);
+    img[id][n] = ' ';
+    len[id] = n;
+    sorted.insert(std::lower_bound(sorted.begin(), sorted.end(), id,
+                                   [&](uint32_t x, uint32_t y) { return std::memcmp(img[x], img[y], 128) < 0; }),
+                  id);
+    b->id[slot] = id;
+    __atomic_store_n(&b->tag[slot], h, __ATOMIC_RELEASE);
+    return id;
+  }
 };
 
 struct Job {
@@ -166,176 +147,135 @@ struct Job {
   Names names;
   std::mutex mu, out_mu;
   std::condition_variable cv, out_cv;
-  uint32_t next_block = 0;
-  std::vector<Run> runs[kHours];
-  std::vector<Rec *> pool;
-  std::vector<Part> spare;  // written output buffers
-  std::vector<std::unique_ptr<Scratch>> scratch;  // few hours finalize at once
-  std::vector<uint8_t> done, block_max;
-  uint32_t watermark = 0, prefix_max = 0, registered = 0, next_hour = 0;
-  bool bad = false;
+  std::vector<Run> runs[kHours];  // per hour, from the registered blocks
+  std::vector<int> top;           // per block: its last hour, or -1 until registered
+  uint32_t next_block = 0, watermark = 0, prefix_max = 0, registered = 0, next_hour = 0;
+  bool bad = false;  // a line arrived after its hour was finalized
   Part parts[kHours];
-  bool ready[kHours] {};
+  std::vector<Rec *> runbufs;  // free buffers, guarded by mu
+  std::vector<std::vector<uint32_t>> latbufs;
+  std::vector<std::unique_ptr<char[]>> outbufs;
 
   Job(const char *b, size_t n, uint32_t l, int f, uint32_t t)
-      : base(b), size(n), lag(l), nblocks(static_cast<uint32_t>((n + kBlock - 1) / kBlock)), threads(t), fd(f),
-        done(nblocks), block_max(nblocks) {}
-  ~Job() { for (Rec *r : pool) std::free(r); }
+      : base(b), size(n), lag(l), nblocks((n + kBlock - 1) / kBlock), threads(t), fd(f), top(nblocks, -1) {}
+  ~Job() { for (Rec *r : runbufs) std::free(r); }
 
-  const char *align(uint32_t block) const {
-    const char *p = base + std::min<size_t>(static_cast<size_t>(block) * kBlock, size);
-    while (block && p < base + size && p[-1] != '\n') ++p;
-    return p;
+  template <class T> T take(std::vector<T> &pool) {
+    std::lock_guard<std::mutex> lock(mu);
+    if (pool.empty()) return T();
+    T t = std::move(pool.back());
+    pool.pop_back();
+    return t;
   }
-  Rec *take_run() {
-    { std::lock_guard<std::mutex> lock(mu);
-      if (!pool.empty()) { Rec *r = pool.back(); pool.pop_back(); return r; } }
-    return static_cast<Rec *>(std::malloc(kRunCap * sizeof(Rec)));
-  }
-
   static const char *next_line(const char *p) {
     while (p[-1] != '\n') ++p;
     return p;
   }
-  // Parses one line and returns the next; at least 256 readable bytes must follow p.
+  const char *align(uint32_t block) const { return block ? next_line(base + std::min<size_t>(size_t{block} * kBlock, size)) : base; }
+
+  // Parses one line and returns the next; 256 readable bytes must follow p.
   __attribute__((always_inline)) const char *line(const char *p, Rec *(&wp)[kHours], Rec *(&bp)[kHours]) {
-    const uint32_t hour = hour_index(p);
+    const uint32_t hour = (p[9] + (p[6] & 1)) * 24 + p[11] * 10 + p[12] - 1698;
     const char *q = p + 28;
-    uint64_t m = spaces(q) | static_cast<uint64_t>(spaces(q + 32)) << 32;
-    const uint32_t k1 = static_cast<uint32_t>(__builtin_ctzll(m));
+    uint64_t m = spaces(q) | uint64_t{spaces(q + 32)} << 32;
+    const uint32_t k1 = __builtin_ctzll(m);
     m &= m - 1;
-    uint32_t k2 = 64;
-    if (m) {
-      k2 = static_cast<uint32_t>(__builtin_ctzll(m));
-    } else {
-      uint32_t t;
-      while (!(t = spaces(q + k2))) k2 += 32;
-      k2 += static_cast<uint32_t>(__builtin_ctz(t));
-    }
-    const char *ep = q + k1 + 1;
-    const uint32_t n = k2 - k1 - 1;
-    const uint32_t id = names.find(ep, n);
+    const uint32_t k2 = m ? __builtin_ctzll(m) : far_space(q);
+    const uint32_t id = names.find(q + k1 + 1, k2 - k1 - 1);
     const char *s = q + k2 + 1;
-    const uint32_t error = s[0] == '5';
+    const uint32_t error = *s == '5';
     s += 4;
-    uint64_t v;
-    std::memcpy(&v, s, 8);
-    v ^= 0x3030303030303030;
-    const uint64_t non_digit = ((v + 0x7676767676767676) | v) & 0x8080808080808080;
-    uint64_t lat;
-    if (non_digit) {
-      const uint32_t digits = static_cast<uint32_t>(__builtin_ctzll(non_digit)) >> 3;
+    uint64_t v = load64(s) ^ 0x3030303030303030, lat;
+    const uint64_t other = ((v + 0x7676767676767676) | v) & 0x8080808080808080;
+    if (other) {
+      const uint32_t digits = __builtin_ctzll(other) >> 3;
       lat = digits8(v << (64 - 8 * digits));
       s += digits;
     } else {
-      lat = digits8(v);
-      for (s += 8; *s != '\n'; ++s) lat = lat * 10 + static_cast<uint64_t>(*s - '0');
+      for (lat = digits8(v), s += 8; *s != '\n'; ++s) lat = lat * 10 + (*s - '0');
     }
     Rec *&w = wp[hour];
-    if (!w) w = bp[hour] = take_run();
-    const uint64_t rec = lat | static_cast<uint64_t>(id | error << 11) << 32;
+    if (!w) {
+      Rec *r = take(runbufs);
+      w = bp[hour] = r ? r : static_cast<Rec *>(std::malloc(kRunCap * sizeof(Rec)));
+    }
+    const uint64_t rec = lat | uint64_t{id | error << 11} << 32;
     std::memcpy(w++, &rec, 8);  // the next record overwrites the 2 spare bytes
     return s + 1;
-  }
-  // Parses the lines starting in [p, end) as kStreams independent streams so their latencies overlap.
-  void lines(const char *p, const char *end, Rec *(&wp)[kHours], Rec *(&bp)[kHours]) {
-    const char *at[kStreams + 1], *pos[kStreams];
-    at[0] = p;
-    for (uint32_t i = 1; i < kStreams; ++i) at[i] = p < end ? std::min(end, next_line(p + (end - p) * i / kStreams)) : p;
-    at[kStreams] = end;
-    std::copy(at, at + kStreams, pos);
-    auto all_live = [&] {
-      bool live = true;
-      for (uint32_t i = 0; i < kStreams; ++i) live &= pos[i] < at[i + 1];
-      return live;
-    };
-    while (all_live())
-      for (uint32_t i = 0; i < kStreams; ++i) pos[i] = line(pos[i], wp, bp);
-    for (uint32_t i = 0; i < kStreams; ++i)
-      while (pos[i] < at[i + 1]) pos[i] = line(pos[i], wp, bp);
   }
 
   void parse(uint32_t block) {
     Rec *wp[kHours] {}, *bp[kHours] {};
-    lines(align(block), align(block + 1), wp, bp);
+    const char *pos[kStreams], *stop[kStreams];  // interleaved streams overlap their latencies
+    const char *p = align(block), *end = align(block + 1);
+    for (uint32_t i = 0; i < kStreams; ++i) pos[i] = i ? next_line(p + (end - p) * i / kStreams) : p;
+    std::copy(pos + 1, pos + kStreams, stop);
+    stop[kStreams - 1] = end;
+    auto live = [&] { return std::equal(pos, pos + kStreams, stop, std::less<>()); };
+    while (live())
+      for (uint32_t i = 0; i < kStreams; ++i) pos[i] = line(pos[i], wp, bp);
+    for (uint32_t i = 0; i < kStreams; ++i)
+      while (pos[i] < stop[i]) pos[i] = line(pos[i], wp, bp);
+
     std::lock_guard<std::mutex> lock(mu);
-    uint32_t hi = 0;
+    int last = 0;
     for (uint32_t h = 0; h < kHours; ++h) {
       if (!bp[h]) continue;
-      hi = h;
-      if (h < next_hour) { bad = true; pool.push_back(bp[h]); }
+      last = h;
+      if (h < next_hour) { bad = true; runbufs.push_back(bp[h]); }
       else runs[h].push_back({bp[h], static_cast<uint32_t>(wp[h] - bp[h])});
     }
-    done[block] = 1;
-    block_max[block] = static_cast<uint8_t>(hi);
-    ++registered;
-    for (; watermark < nblocks && done[watermark]; ++watermark) prefix_max = std::max<uint32_t>(prefix_max, block_max[watermark]);
+    top[block] = last;
+    for (++registered; watermark < nblocks && top[watermark] >= 0; ++watermark) prefix_max = std::max<int>(prefix_max, top[watermark]);
     cv.notify_all();
   }
 
-  void finalize(uint32_t hour, Scratch &s) {
+  void finalize(uint32_t hour) {
     std::vector<Run> mine;
-    { std::lock_guard<std::mutex> lock(mu);
+    std::vector<uint16_t> order;
+    { std::scoped_lock lock(mu, names.mu);
       mine.swap(runs[hour]);
-      std::lock_guard<std::mutex> names_lock(names.mu);
-      s.order = names.sorted; }
-    std::memset(s.count, 0, sizeof(s.count));
-    size_t total = 0;
-    for (const Run &r : mine) {
-      total += r.n;
-      for (uint32_t i = 0; i < r.n; ++i) s.count[r.rec[i].tag & (kIds - 1)] += 1 + (static_cast<uint64_t>(r.rec[i].tag >> 11) << 32);
+      order = names.sorted; }
+    uint64_t count[kIds] = {};  // low 32 bits requests, high 32 bits 5xx
+    uint32_t pos[kIds], total = 0;
+    for (const auto &[rec, n] : mine)
+      for (uint32_t i = 0; i < n; ++i) count[rec[i].tag % kIds] += 1 + (uint64_t{rec[i].tag} >> 11 << 32);
+    for (const uint16_t id : order) {
+      pos[id] = total;
+      total += static_cast<uint32_t>(count[id]);
     }
-    uint32_t groups = 0, offset = 0;
-    size_t bytes = 0;
-    for (const uint16_t id : s.order) {
-      s.pos[id] = offset;
-      offset += static_cast<uint32_t>(s.count[id]);
-      if (s.count[id]) { ++groups; bytes += names.len[id] + 130; }
-    }
-    s.lat.resize(total);
-    for (const Run &r : mine)
-      for (uint32_t i = 0; i < r.n; ++i) s.lat[s.pos[r.rec[i].tag & (kIds - 1)]++] = r.rec[i].lat;
-    Part part;
-    { std::lock_guard<std::mutex> lock(mu);
-      if (!spare.empty()) { part = std::move(spare.back()); spare.pop_back(); } }
-    if (!part.data) part.data.reset(new char[kPartCap]);
-    char *out = part.data.get();
-    char label[22];
-    static const char *const days[4] = {"2026-10-30", "2026-10-31", "2026-11-01", "2026-11-02"};
-    std::snprintf(label, sizeof(label), "%sT%02u:00:00Z ", days[(hour + 18) / 24], (hour + 18) % 24);
-    for (const uint16_t id : s.order) {
-      const uint32_t n = static_cast<uint32_t>(s.count[id]), errors = static_cast<uint32_t>(s.count[id] >> 32);
+    std::vector<uint32_t> lat = take(latbufs);
+    lat.reserve(1 << 17);
+    lat.resize(total);
+    for (const auto &[rec, n] : mine)
+      for (uint32_t i = 0; i < n; ++i) lat[pos[rec[i].tag % kIds]++] = rec[i].lat;
+
+    std::unique_ptr<char[]> text = take(outbufs);
+    if (!text) text.reset(new char[kPartCap]);
+    char *out = text.get(), label[22];
+    std::snprintf(label, sizeof label, "%sT%02u:00:00Z ", kDays[(hour + 18) / 24], (hour + 18) % 24);
+    auto put = [&](uint64_t v) { *out++ = ' '; out = std::to_chars(out, out + 20, v).ptr; };
+    for (const uint16_t id : order) {
+      const uint32_t n = static_cast<uint32_t>(count[id]), errors = static_cast<uint32_t>(count[id] >> 32);
       if (!n) continue;
-      uint32_t *const first = s.lat.data() + s.pos[id] - n;
+      uint32_t *const a = lat.data() + pos[id] - n;
       const uint32_t r50 = (50 * n + 99) / 100 - 1, r95 = (95 * n + 99) / 100 - 1, r99 = (99 * n + 99) / 100 - 1;
-      select(first, 0, n, r50);
-      select(first, r50 + 1, n, r95);
-      select(first, r95 + 1, n, r99);
+      select(a, 0, n, r50);
+      select(a, r50 + 1, n, r95);
+      select(a, r95 + 1, n, r99);
       std::memcpy(out, label, 21);
-      out += 21;
-      std::memcpy(out, names.img[id], names.len[id]);
-      out += names.len[id];
-      for (const uint64_t v : {uint64_t{n}, uint64_t{first[r50]}, uint64_t{first[r95]}, uint64_t{first[r99]}}) {
-        *out++ = ' ';
-        append(out, v);
-      }
-      if (errors) {
-        *out++ = ' ';
-        append(out, errors);
-        *out++ = ' ';
-        append(out, uint64_t{errors} * 1000000 / n);
-        *out++ = '\n';
-      } else {
-        std::memcpy(out, " 0 0\n", 5);
-        out += 5;
-      }
+      std::memcpy(out + 21, names.img[id], names.len[id]);
+      out += 21 + names.len[id];
+      for (const uint64_t v : {uint64_t{n}, uint64_t{a[r50]}, uint64_t{a[r95]}, uint64_t{a[r99]}, uint64_t{errors}}) put(v);
+      put(errors ? uint64_t{errors} * 1000000 / n : 0);
+      *out++ = '\n';
     }
-    part.size = static_cast<size_t>(out - part.data.get());
+    const size_t length = out - text.get();
     { std::lock_guard<std::mutex> lock(mu);
-      for (const Run &r : mine) pool.push_back(r.rec); }
-    std::lock_guard<std::mutex> lock(out_mu);
-    parts[hour] = std::move(part);
-    ready[hour] = true;
+      latbufs.push_back(std::move(lat));
+      for (const auto &[rec, n] : mine) runbufs.push_back(rec); }
+    { std::lock_guard<std::mutex> lock(out_mu);
+      parts[hour] = {std::move(text), length}; }
     out_cv.notify_one();
   }
 
@@ -344,20 +284,20 @@ struct Job {
   void write_parts() {
     off_t end[kHours + 1] {};
     for (uint32_t h = 0; h < kHours; ++h) {
-      Part part;
-      { std::unique_lock<std::mutex> lock(out_mu);
-        out_cv.wait(lock, [&] { return ready[h]; });
-        part = std::move(parts[h]); }
-      for (size_t off = 0; off < part.size;) {
-        const ssize_t w = write(fd, part.data.get() + off, part.size - off);
+      std::unique_lock<std::mutex> lock(out_mu);
+      out_cv.wait(lock, [&] { return parts[h].first != nullptr; });
+      Part part = std::move(parts[h]);
+      lock.unlock();
+      for (size_t done = 0; done < part.second;) {
+        const ssize_t w = write(fd, part.first.get() + done, part.second - done);
         if (w <= 0) fail("write summary");
-        off += static_cast<size_t>(w);
+        done += w;
       }
-      end[h + 1] = end[h] + static_cast<off_t>(part.size);
-      { std::lock_guard<std::mutex> lock(mu);
-        spare.push_back(std::move(part)); }
-      sync_file_range(fd, end[h], end[h + 1] - end[h], SYNC_FILE_RANGE_WRITE);
+      end[h + 1] = end[h] + part.second;
+      sync_file_range(fd, end[h], part.second, SYNC_FILE_RANGE_WRITE);
       if (h >= kKeep) posix_fadvise(fd, 0, end[h - kKeep + 1], POSIX_FADV_DONTNEED);
+      std::lock_guard<std::mutex> pool_lock(mu);
+      outbufs.push_back(std::move(part.first));
     }
   }
 
@@ -370,14 +310,10 @@ struct Job {
     for (;;) {
       if (claimable()) {
         const uint32_t hour = next_hour++;
-        if (next_hour >= kHours) cv.notify_all();
-        if (scratch.empty()) scratch.push_back(std::make_unique<Scratch>());
-        std::unique_ptr<Scratch> s = std::move(scratch.back());
-        scratch.pop_back();
+        cv.notify_all();
         lock.unlock();
-        finalize(hour, *s);
+        finalize(hour);
         lock.lock();
-        scratch.push_back(std::move(s));
       } else if (next_block < nblocks && next_block < watermark + kAhead) {
         const uint32_t block = next_block++;
         lock.unlock();
@@ -391,40 +327,29 @@ struct Job {
     }
   }
   bool run() {
-    std::vector<std::thread> pool_threads;
-    for (uint32_t i = 0; i < threads; ++i) pool_threads.emplace_back([this] { work(); });
+    std::vector<std::thread> pool;
+    for (uint32_t i = 0; i < threads; ++i) pool.emplace_back([this] { work(); });
     write_parts();
-    for (auto &t : pool_threads) t.join();
+    for (auto &t : pool) t.join();
     return !bad;
   }
 };
 } // namespace
 
 int main() {
-  const char *const data_dir = std::getenv("SD_DATA_DIR");
-  const std::string input_path = std::string(data_dir ? data_dir : "/data") + "/requests.log";
-  const int input = open(input_path.c_str(), O_RDONLY);
-  if (input < 0) fail("open requests");
-  struct stat statbuf {};
-  if (fstat(input, &statbuf) != 0) fail("stat requests");
-  const size_t bytes = static_cast<size_t>(statbuf.st_size);
-  char *mapped = static_cast<char *>(mmap(nullptr, bytes + 8192, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
-  if (mapped == MAP_FAILED || (bytes && mmap(mapped, bytes, PROT_READ, MAP_PRIVATE | MAP_FIXED, input, 0) == MAP_FAILED))
-    fail("mmap requests");
-  close(input);
-
-  const char *const out_dir = std::getenv("SD_OUT_DIR");
-  const std::string output_path = std::string(out_dir ? out_dir : "/out") + "/summary.txt";
-  const int fd = open(output_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  const char *const dir = std::getenv("SD_DATA_DIR"), *const out = std::getenv("SD_OUT_DIR"), *const forced = std::getenv("SD_THREADS");
+  const int in = open((std::string(dir ? dir : "/data") + "/requests.log").c_str(), O_RDONLY);
+  const size_t bytes = in < 0 ? 0 : lseek(in, 0, SEEK_END);
+  // Zero pages follow the file so that the last lines can be scanned past its end.
+  char *map = static_cast<char *>(mmap(nullptr, bytes + 8192, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+  if (in < 0 || map == MAP_FAILED || (bytes && mmap(map, bytes, PROT_READ, MAP_PRIVATE | MAP_FIXED, in, 0) == MAP_FAILED)) fail("map requests");
+  const int fd = open((std::string(out ? out : "/out") + "/summary.txt").c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
   if (fd < 0) fail("open summary");
-  cpu_set_t set;
-  CPU_ZERO(&set);
-  sched_getaffinity(0, sizeof(set), &set);
-  const char *const forced = std::getenv("SD_THREADS");
-  const uint32_t threads = forced ? static_cast<uint32_t>(std::atoi(forced)) : std::max(1, CPU_COUNT(&set));
-  if (!std::make_unique<Job>(mapped, bytes, kLag, fd, threads)->run()) {
-    if (ftruncate(fd, 0) != 0 || lseek(fd, 0, SEEK_SET) != 0) fail("rewind summary");
-    std::make_unique<Job>(mapped, bytes, kNever, fd, threads)->run();  // exact rerun without early finalization
+  cpu_set_t cpus {};
+  sched_getaffinity(0, sizeof cpus, &cpus);
+  const uint32_t threads = forced ? std::atoi(forced) : CPU_COUNT(&cpus);
+  if (!std::make_unique<Job>(map, bytes, kLag, fd, threads)->run()) {
+    if (ftruncate(fd, 0) || lseek(fd, 0, SEEK_SET)) fail("rewind summary");
+    std::make_unique<Job>(map, bytes, kNever, fd, threads)->run();
   }
-  if (close(fd) != 0) fail("close summary");
 }
