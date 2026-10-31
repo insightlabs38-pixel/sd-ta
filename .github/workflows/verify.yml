@@ -45,6 +45,20 @@ jobs:
             SD_DATA_DIR="/tmp/a-seed$seed" SD_OUT_DIR=/tmp/a-out ./solution
             cmp /tmp/a-out/summary.txt /tmp/a-ref/summary.txt
           done
+      - name: Reordered inputs and sanitizers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tests/disorder.py "$PWD/solution" /tmp/organizer
+          g++ -O1 -g -fsanitize=address,undefined -march=x86-64-v3 -std=c++20 -pthread -o /tmp/solution-asan track-a/main.cpp
+          g++ -O1 -g -fsanitize=thread -march=x86-64-v3 -std=c++20 -pthread -o /tmp/solution-tsan track-a/main.cpp
+          echo 'race:Names::' > /tmp/tsan.supp
+          for scale in tiny sample; do
+            for tool in asan tsan; do
+              TSAN_OPTIONS=suppressions=/tmp/tsan.supp SD_THREADS=6 SD_DATA_DIR="/tmp/a-$scale" SD_OUT_DIR=/tmp/a-out "/tmp/solution-$tool"
+              sha256sum /tmp/a-out/summary.txt
+            done
+          done
       - name: Compare full-input end-to-end runtime with verified champion
         shell: bash
         run: |
