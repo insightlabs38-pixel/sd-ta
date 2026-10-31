@@ -31,6 +31,8 @@ def check(binary, seed, count):
         hour = rng.randrange(72)
         endpoint = ENDPOINTS[rng.randrange(13 if i % 5 == 0 else len(ENDPOINTS))]
         latency = rng.randrange(100000) if i % 13 else (0 if i % 2 == 0 else 4294967295)
+        if i % 31 == 0: latency = (1 << 24) - 1
+        elif i % 37 == 0: latency = 1 << 24
         status = rng.choice(STATUSES)
         ts = hours[hour] + f'{rng.randrange(60):02d}:{rng.randrange(60):02d}.{rng.randrange(1000000):06d}Z'
         rows.append(f'{ts} {METHODS[i % 7]} {endpoint} {status} {latency}\n')
