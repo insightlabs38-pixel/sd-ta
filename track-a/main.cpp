@@ -112,14 +112,13 @@ struct SpinLock {
   void unlock() { held.clear(std::memory_order_release); }
 };
 
-// Exact endpoint dictionary: 8-way buckets, lock-free hits, locked inserts
-// published by a release store of the tag (relies on x86 load ordering).
+// Exact endpoint dictionary: 8-way buckets, 21-bit fingerprints and 11-bit
+// IDs in atomic slots; collisions are resolved by full-key comparison.
 // Keys are stored zero-padded after a space, so n + 1 equal bytes prove
 // equality.
 struct Names {
-  struct alignas(64) Bucket {
-    uint32_t tag[8];
-    uint16_t id[8];
+  struct alignas(32) Bucket {
+    uint32_t entry[8];
   };
   Bucket buckets[512]{};
   alignas(64) char img[kIds][128]{};
@@ -139,13 +138,15 @@ struct Names {
   }
   // The id of the key, or -1 with b set to the bucket it belongs in.
   int lookup(const char *ep, uint32_t n, uint32_t h, Bucket *&b) {
-    for (uint32_t i = h >> 16;; ++i) {
+    for (uint32_t i = h >> 11;; ++i) {
       b = buckets + (i & 511);
       for (uint32_t lane = 0; lane < 8; ++lane) {
-        const uint32_t tag = __atomic_load_n(&b->tag[lane], __ATOMIC_ACQUIRE);
-        if (tag == h && same(b->id[lane], ep, n))
-          return b->id[lane];
-        if (!tag) return -1;
+        const uint32_t entry =
+            __atomic_load_n(&b->entry[lane], __ATOMIC_ACQUIRE);
+        const uint32_t id = entry & (kIds - 1);
+        if ((entry >> 11) == h && same(id, ep, n))
+          return id;
+        if (!entry) return -1;
       }
     }
   }
@@ -153,7 +154,8 @@ struct Names {
     const uint64_t keep = n < 8 ? n * 8 : 64;
     const uint64_t x = _bzhi_u64(load64(ep), keep),
                    y = _bzhi_u64(load64(ep + std::max(n, 8u) - 8), keep);
-    const uint32_t h = _mm_crc32_u64(_mm_crc32_u64(n, x), y) | 1;
+    const uint32_t h =
+        (_mm_crc32_u64(_mm_crc32_u64(n, x), y) & 0x1fffff) | 1;
     Bucket *b;
     const int id = lookup(ep, n, h, b);
     return id >= 0 ? id : add(ep, n, h);
@@ -165,7 +167,7 @@ struct Names {
       return found;
     const uint32_t id = size++;
     uint32_t slot = 0;
-    while (__atomic_load_n(&b->tag[slot], __ATOMIC_RELAXED))
+    while (__atomic_load_n(&b->entry[slot], __ATOMIC_RELAXED))
       ++slot;
     if (id >= kIds)
       fail("too many endpoints");
@@ -178,8 +180,7 @@ struct Names {
                                             0;
                                    }),
                   id);
-    b->id[slot] = id;
-    __atomic_store_n(&b->tag[slot], h, __ATOMIC_RELEASE);
+    __atomic_store_n(&b->entry[slot], (h << 11) | id, __ATOMIC_RELEASE);
     return id;
   }
 };
