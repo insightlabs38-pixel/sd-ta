@@ -118,7 +118,7 @@ struct SpinLock {
 // equality.
 struct Names {
   struct alignas(64) Bucket {
-    uint32_t tag[8];
+    uint64_t tags[4]; // atomic pairs of 32-bit hashes
     uint16_t id[8];
   };
   Bucket buckets[512]{};
@@ -141,12 +141,21 @@ struct Names {
   int lookup(const char *ep, uint32_t n, uint32_t h, Bucket *&b) {
     for (uint32_t i = h >> 16;; ++i) {
       b = buckets + (i & 511);
-      for (uint32_t lane = 0; lane < 8; ++lane) {
-        const uint32_t tag = __atomic_load_n(&b->tag[lane], __ATOMIC_ACQUIRE);
-        if (tag == h && same(b->id[lane], ep, n))
+      const uint64_t p0 = __atomic_load_n(&b->tags[0], __ATOMIC_ACQUIRE);
+      const uint64_t p1 = __atomic_load_n(&b->tags[1], __ATOMIC_ACQUIRE);
+      const uint64_t p2 = __atomic_load_n(&b->tags[2], __ATOMIC_ACQUIRE);
+      const uint64_t p3 = __atomic_load_n(&b->tags[3], __ATOMIC_ACQUIRE);
+      const __m256i tags = _mm256_set_epi64x(p3, p2, p1, p0);
+      uint32_t matches = _mm256_movemask_ps(_mm256_castsi256_ps(
+          _mm256_cmpeq_epi32(tags, _mm256_set1_epi32(h))));
+      while (matches) {
+        const uint32_t lane = __builtin_ctz(matches);
+        if (same(b->id[lane], ep, n))
           return b->id[lane];
-        if (!tag) return -1;
+        matches &= matches - 1;
       }
+      if (!(p3 >> 32))
+        return -1;
     }
   }
   __attribute__((always_inline)) uint32_t find(const char *ep, uint32_t n) {
@@ -165,7 +174,8 @@ struct Names {
       return found;
     const uint32_t id = size++;
     uint32_t slot = 0;
-    while (__atomic_load_n(&b->tag[slot], __ATOMIC_RELAXED))
+    while ((__atomic_load_n(&b->tags[slot >> 1], __ATOMIC_RELAXED) >>
+            (32 * (slot & 1))) & 0xffffffffu)
       ++slot;
     if (id >= kIds)
       fail("too many endpoints");
@@ -179,7 +189,11 @@ struct Names {
                                    }),
                   id);
     b->id[slot] = id;
-    __atomic_store_n(&b->tag[slot], h, __ATOMIC_RELEASE);
+    const uint32_t pair = slot >> 1;
+    const uint64_t prior = __atomic_load_n(&b->tags[pair], __ATOMIC_RELAXED);
+    __atomic_store_n(&b->tags[pair],
+                     prior | (uint64_t{h} << (32 * (slot & 1))),
+                     __ATOMIC_RELEASE);
     return id;
   }
 };
