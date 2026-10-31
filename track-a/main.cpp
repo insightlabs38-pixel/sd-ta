@@ -375,8 +375,8 @@ struct Job {
                     std::malloc(kRunCap * sizeof(Rec) + sizeof(uint64_t)));
       }
     }
-    _mm_prefetch(p + 1280, _MM_HINT_T0);
-    _mm_prefetch(p + 1344, _MM_HINT_T0);
+    _mm_prefetch(p + 2560, _MM_HINT_T0);
+    _mm_prefetch(p + 2624, _MM_HINT_T0);
     const char *q = p + 28;
     uint64_t m = spaces(q) | uint64_t{spaces(q + 32)} << 32;
     const uint32_t k1 = __builtin_ctzll(m);
