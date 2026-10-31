@@ -101,7 +101,7 @@ struct Worker {
       const uint32_t id = intern(name, dictionary, names);
       const bool error = p[1] == '5';
       p += 5;
-      uint32_t latency = 0;
+      uint32_t latency = static_cast<uint32_t>(*p++ - '0');
       while (*p != '\n') latency = latency * 10 + static_cast<uint32_t>(*p++ - '0');
       ++p;
       const uint32_t key = (hour << kLocalBits) | id;
