@@ -44,9 +44,8 @@ __attribute__((target("sse4.2"))) uint32_t endpoint_hash(std::string_view name) 
     std::memcpy(&b, name.data() + (n - 8) / 2, 8);
     std::memcpy(&c, name.data() + n - 8, 8);
   }
-  uint32_t h = _mm_crc32_u64(n, a);
-  h = _mm_crc32_u64(h, b);
-  return _mm_crc32_u64(h, c);
+  const uint64_t mix = a ^ ((b << 17) | (b >> 47)) ^ ((c << 39) | (c >> 25));
+  return _mm_crc32_u64(n, mix);
 }
 __attribute__((always_inline)) inline uint32_t intern(std::string_view name, std::array<Slot, 4096> &dictionary,
                 std::vector<std::string_view> &names) {
