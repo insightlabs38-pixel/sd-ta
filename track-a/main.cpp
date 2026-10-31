@@ -149,12 +149,15 @@ struct Job {
   int fd;
   Names names;
   std::mutex mu, out_mu;
-  std::condition_variable cv, out_cv;
+  std::condition_variable cv;
   std::vector<Run> runs[kHours];  // per hour, from the registered blocks
   std::vector<int> top;           // per block: its last hour, or -1 until registered
   uint32_t next_block = 0, watermark = 0, prefix_max = 0, registered = 0, next_hour = 0;
   bool bad = false;  // a line arrived after its hour was finalized
   Part parts[kHours];
+  off_t end[kHours + 1] {};  // output offset after each hour
+  uint32_t written = 0;      // hours written so far
+  bool writing = false;
   std::vector<Rec *> runbufs;  // free buffers, guarded by mu
   std::vector<std::vector<uint32_t>> latbufs;
   std::vector<std::unique_ptr<char[]>> outbufs;
@@ -277,31 +280,32 @@ struct Job {
     { std::lock_guard<std::mutex> lock(mu);
       latbufs.push_back(std::move(lat));
       for (const auto &[rec, n] : mine) runbufs.push_back(rec); }
-    { std::lock_guard<std::mutex> lock(out_mu);
-      parts[hour] = {std::move(text), length}; }
-    out_cv.notify_one();
+    emit(hour, {std::move(text), length});
   }
 
-  // Writes the hours in order, starts their writeback and drops older cached
-  // output pages (best effort) so the page cache stays small.
-  void write_parts() {
-    off_t end[kHours + 1] {};
-    for (uint32_t h = 0; h < kHours; ++h) {
-      std::unique_lock<std::mutex> lock(out_mu);
-      out_cv.wait(lock, [&] { return parts[h].first != nullptr; });
-      Part part = std::move(parts[h]);
+  // Whoever completes an hour writes all hours that are ready in order (a
+  // thread that finds a writer active just leaves its part), starts their
+  // writeback and drops older cached output pages (best effort).
+  void emit(uint32_t hour, Part ready) {
+    std::unique_lock<std::mutex> lock(out_mu);
+    parts[hour] = std::move(ready);
+    if (writing) return;
+    for (writing = true; written < kHours && parts[written].first; ++written) {
+      Part part = std::move(parts[written]);
       lock.unlock();
       for (size_t done = 0; done < part.second;) {
         const ssize_t w = write(fd, part.first.get() + done, part.second - done);
         if (w <= 0) fail("write summary");
         done += w;
       }
-      end[h + 1] = end[h] + part.second;
-      sync_file_range(fd, end[h], part.second, SYNC_FILE_RANGE_WRITE);
-      if (h >= kKeep) posix_fadvise(fd, 0, end[h - kKeep + 1], POSIX_FADV_DONTNEED);
-      std::lock_guard<std::mutex> pool_lock(mu);
-      outbufs.push_back(std::move(part.first));
+      end[written + 1] = end[written] + part.second;
+      sync_file_range(fd, end[written], part.second, SYNC_FILE_RANGE_WRITE);
+      if (written >= kKeep) posix_fadvise(fd, 0, end[written - kKeep + 1], POSIX_FADV_DONTNEED);
+      { std::lock_guard<std::mutex> pool_lock(mu);
+        outbufs.push_back(std::move(part.first)); }
+      lock.lock();
     }
+    writing = false;
   }
 
   bool claimable() const { return next_hour < kHours && (registered == nblocks || next_hour + lag <= prefix_max); }
@@ -335,7 +339,6 @@ struct Job {
   bool run() {
     std::vector<std::thread> pool;
     for (uint32_t i = 0; i < threads; ++i) pool.emplace_back([this, i] { work(i); });
-    write_parts();
     for (auto &t : pool) t.join();
     return !bad;
   }
