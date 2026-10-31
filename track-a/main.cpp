@@ -147,6 +147,20 @@ void sort16(const int32_t *a, uint32_t n, int32_t *out) {
 // level (b is scratch of the same size).
 void multiselect(int32_t *a, int32_t *b, uint32_t lo, uint32_t hi,
                  const uint32_t *k, int nk, int32_t *out, int depth = 0) {
+  if (hi - lo <= 3) {
+    const uint32_t n = hi - lo;
+    const int32_t x = a[lo], y = n > 1 ? a[lo + 1] : x;
+    int32_t v[3] = {std::min(x, y), std::max(x, y), std::max(x, y)};
+    if (n == 3) {
+      const int32_t z = a[lo + 2];
+      v[0] = std::min(v[0], z);
+      v[1] = std::max(std::min(x, y), std::min(std::max(x, y), z));
+      v[2] = std::max(v[2], z);
+    }
+    for (int i = 0; i < nk; ++i)
+      out[i] = v[k[i] - lo];
+    return;
+  }
   if (hi - lo <= 16) {
     alignas(32) int32_t sorted[16];
     sort16(a + lo, hi - lo, sorted);
