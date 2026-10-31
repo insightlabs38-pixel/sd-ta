@@ -109,12 +109,52 @@ uint32_t split(const int32_t *src, int32_t *dst, uint32_t lo, uint32_t hi,
   return l - lo;
 }
 
+// Sorts the first n <= 16 values of a (plus 16 readable slots) into out[0, 16)
+// with a bitonic network on two vectors; unused lanes sort to the end.
+template <int M> __m256i step(__m256i v, __m256i other) {
+  return _mm256_blend_epi32(_mm256_min_epi32(v, other),
+                            _mm256_max_epi32(v, other), M);
+}
+__m256i sort8(__m256i v) {
+  const __m256i flip = _mm256_setr_epi32(7, 6, 5, 4, 3, 2, 1, 0);
+  v = step<0xAA>(v, _mm256_shuffle_epi32(v, 0xB1));
+  v = step<0xCC>(v, _mm256_shuffle_epi32(v, 0x1B));
+  v = step<0xAA>(v, _mm256_shuffle_epi32(v, 0xB1));
+  v = step<0xF0>(v, _mm256_permutevar8x32_epi32(v, flip));
+  v = step<0xCC>(v, _mm256_shuffle_epi32(v, 0x4E));
+  return step<0xAA>(v, _mm256_shuffle_epi32(v, 0xB1));
+}
+__m256i merge8(__m256i v) { // v is a bitonic sequence
+  v = step<0xF0>(v, _mm256_permute2x128_si256(v, v, 1));
+  v = step<0xCC>(v, _mm256_shuffle_epi32(v, 0x4E));
+  return step<0xAA>(v, _mm256_shuffle_epi32(v, 0xB1));
+}
+void sort16(const int32_t *a, uint32_t n, int32_t *out) {
+  const __m256i iota = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7),
+                big = _mm256_set1_epi32(INT32_MAX), count = _mm256_set1_epi32(n);
+  __m256i x = _mm256_blendv_epi8(big, load(a), _mm256_cmpgt_epi32(count, iota)),
+          y = _mm256_blendv_epi8(
+              big, load(a + 8),
+              _mm256_cmpgt_epi32(count, _mm256_add_epi32(iota, _mm256_set1_epi32(8))));
+  x = sort8(x);
+  y = _mm256_permutevar8x32_epi32(sort8(y), _mm256_setr_epi32(7, 6, 5, 4, 3, 2, 1, 0));
+  _mm256_storeu_si256((__m256i *)out, merge8(_mm256_min_epi32(x, y)));
+  _mm256_storeu_si256((__m256i *)(out + 8), merge8(_mm256_max_epi32(x, y)));
+}
+
 // Stores the values at the sorted positions k[0..nk) of a[lo, hi) into out;
 // the positions are ascending and inside the range. a and b swap roles at each
 // level (b is scratch of the same size).
 void multiselect(int32_t *a, int32_t *b, uint32_t lo, uint32_t hi,
                  const uint32_t *k, int nk, int32_t *out, int depth = 0) {
-  if (hi - lo <= 16 || depth > 40) {
+  if (hi - lo <= 16) {
+    alignas(32) int32_t sorted[16];
+    sort16(a + lo, hi - lo, sorted);
+    for (int i = 0; i < nk; ++i)
+      out[i] = sorted[k[i] - lo];
+    return;
+  }
+  if (depth > 40) {
     std::sort(a + lo, a + hi);
     for (int i = 0; i < nk; ++i)
       out[i] = a[k[i]];
@@ -260,7 +300,7 @@ uint64_t digits_of(uint32_t v) {
   return q | (x - q * 10) << 8;
 }
 // Appends a space and v; 16 bytes of slack must follow.
-char *put(char *out, uint32_t v) {
+__attribute__((always_inline)) char *put(char *out, uint32_t v) {
   *out++ = ' ';
   if (v >= 100000000)
     return std::to_chars(out, out + 10, v).ptr;
@@ -376,9 +416,11 @@ struct Job {
       size_t room = SIZE_MAX;
       for (const Stream &x : st)
         room = std::min<size_t>(room, x.stop - x.pos);
-      for (rounds = room / kMaxLine; rounds--;)
+      for (rounds = room / kMaxLine; rounds--;) {
+#pragma GCC unroll 4
         for (Stream &x : st)
           line(local, x, wp, bp);
+      }
       rounds = room / kMaxLine;
     }
     for (Stream &x : st)
@@ -417,13 +459,18 @@ struct Job {
     for (const auto &[rec, n] : mine)
       for (uint32_t i = 0; i < n; ++i)
         ++count[rec[i].tag];
+    uint16_t live[kIds]; // the endpoints seen in this hour, in output order
+    uint32_t seen = 0;
     for (const uint16_t id : order) {
+      const uint32_t n = count[id] + count[id + kIds];
       pos[id] = total;
-      total += count[id] + count[id + kIds];
+      total += n;
+      live[seen] = id;
+      seen += n != 0;
     }
     std::vector<int32_t> lat = take(latbufs);
     lat.reserve(1 << 17);
-    lat.resize(total);
+    lat.resize(total + 16);
     for (const auto &[rec, n] : mine)
       for (uint32_t i = 0; i < n; ++i)
         lat[pos[rec[i].tag % kIds]++] = rec[i].lat ^ 0x80000000;
@@ -435,10 +482,9 @@ struct Job {
     char *out = text.get(), label[22];
     std::snprintf(label, sizeof label, "%sT%02u:00:00Z ",
                   kDays[(hour + 18) / 24], (hour + 18) % 24);
-    for (const uint16_t id : order) {
+    for (uint32_t i = 0; i < seen; ++i) {
+      const uint16_t id = live[i];
       const uint32_t errors = count[id + kIds], n = count[id] + errors;
-      if (!n)
-        continue;
       int32_t *const a = lat.data() + pos[id] - n;
       const uint32_t ranks[3] = {(50 * n + 99) / 100 - 1, (95 * n + 99) / 100 - 1,
                                  (99 * n + 99) / 100 - 1};
@@ -450,10 +496,10 @@ struct Job {
       for (uint32_t i = 0; i < 128; i += 32)
         _mm256_storeu_si256((__m256i *)(out + 21 + i), load(names.img[id] + i));
       out += 21 + names.len[id];
-      for (const uint32_t v : {n, uint32_t(value[0]) ^ 0x80000000,
-                               uint32_t(value[1]) ^ 0x80000000,
-                               uint32_t(value[2]) ^ 0x80000000, errors})
-        out = put(out, v);
+      out = put(put(put(put(put(out, n), uint32_t(value[0]) ^ 0x80000000),
+                        uint32_t(value[1]) ^ 0x80000000),
+                    uint32_t(value[2]) ^ 0x80000000),
+                errors);
       out = errors ? put(out, uint64_t{errors} * 1000000 / n) : put(out, 0);
       *out++ = '\n';
     }
