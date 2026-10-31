@@ -77,14 +77,14 @@ jobs:
           git fetch --depth=1 origin d9680bd4158eb4516bd0d8d26332be17caacf62c
           git show d9680bd4158eb4516bd0d8d26332be17caacf62c:track-a/main.cpp > /tmp/a-prev.cpp
           g++ -O3 -march=x86-64-v3 -std=c++20 -DNDEBUG -pthread -static-libstdc++ -static-libgcc -o /tmp/a-prev-v3 /tmp/a-prev.cpp
-          git fetch --depth=1 origin 2ddeaa42e79aed7fee33de1078d2557877c0c9f0
-          git show 2ddeaa42e79aed7fee33de1078d2557877c0c9f0:track-a/main.cpp > /tmp/a-output-only.cpp
-          g++ -O3 -march=x86-64-v3 -std=c++20 -DNDEBUG -pthread -static-libstdc++ -static-libgcc -o /tmp/a-output-only /tmp/a-output-only.cpp
+          git fetch --depth=1 origin 8ec49c42ed9b2fc0e4df0bca489a1cc7ae13d4dd
+          git show 8ec49c42ed9b2fc0e4df0bca489a1cc7ae13d4dd:track-a/main.cpp > /tmp/a-packed-only.cpp
+          g++ -O3 -march=x86-64-v3 -std=c++20 -DNDEBUG -pthread -static-libstdc++ -static-libgcc -o /tmp/a-packed-only /tmp/a-packed-only.cpp
           python - <<'PY' | tee -a /tmp/summary.txt
           import hashlib, os, random, statistics, subprocess, time
           env = dict(os.environ, SD_DATA_DIR='/tmp/a-full', SD_OUT_DIR='/tmp/a-out')
           expected = '495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3'
-          binaries = {'streaming-base': '/tmp/a-prev-v3', 'prior': '/tmp/a-output-only', 'candidate': './solution'}
+          binaries = {'streaming-base': '/tmp/a-prev-v3', 'prior': '/tmp/a-packed-only', 'candidate': './solution'}
           samples = {key: [] for key in binaries}
           rng = random.Random(20261030)
           for _ in range(31):
@@ -105,9 +105,9 @@ jobs:
         run: |
           set -euo pipefail
           SD_DATA_DIR=/tmp/a-full SD_OUT_DIR=/tmp/a-out /usr/bin/time -f 'champion RSS KiB=%M' -o /tmp/a-rss-prev /tmp/a-prev-v3
-          SD_DATA_DIR=/tmp/a-full SD_OUT_DIR=/tmp/a-out /usr/bin/time -f 'output-only RSS KiB=%M' -o /tmp/a-rss-output-only /tmp/a-output-only
+          SD_DATA_DIR=/tmp/a-full SD_OUT_DIR=/tmp/a-out /usr/bin/time -f 'packed-only RSS KiB=%M' -o /tmp/a-rss-packed-only /tmp/a-packed-only
           SD_DATA_DIR=/tmp/a-full SD_OUT_DIR=/tmp/a-out /usr/bin/time -f 'candidate RSS KiB=%M' -o /tmp/a-rss-new ./solution
-          cat /tmp/a-rss-prev /tmp/a-rss-output-only /tmp/a-rss-new
+          cat /tmp/a-rss-prev /tmp/a-rss-packed-only /tmp/a-rss-new
       - name: Validate Docker allowlist and offline sandbox
         shell: bash
         run: |
@@ -139,13 +139,13 @@ jobs:
           cp /tmp/a-prev.cpp /tmp/a-prev-image/main.cpp
           cp track-a/Dockerfile /tmp/a-prev-image/Dockerfile
           docker build --network=none --pull=false -t sd-track-a-prev -f /tmp/a-prev-image/Dockerfile /tmp/a-prev-image
-          mkdir -p /tmp/a-output-only-image
-          cp /tmp/a-output-only.cpp /tmp/a-output-only-image/main.cpp
-          cp track-a/Dockerfile /tmp/a-output-only-image/Dockerfile
-          docker build --network=none --pull=false -t sd-track-a-output-only -f /tmp/a-output-only-image/Dockerfile /tmp/a-output-only-image
-          for label in champion output-only candidate; do
+          mkdir -p /tmp/a-packed-only-image
+          cp /tmp/a-packed-only.cpp /tmp/a-packed-only-image/main.cpp
+          cp track-a/Dockerfile /tmp/a-packed-only-image/Dockerfile
+          docker build --network=none --pull=false -t sd-track-a-packed-only -f /tmp/a-packed-only-image/Dockerfile /tmp/a-packed-only-image
+          for label in champion packed-only candidate; do
             image=sd-track-a-prev
-            if [ "$label" = output-only ]; then image=sd-track-a-output-only; fi
+            if [ "$label" = packed-only ]; then image=sd-track-a-packed-only; fi
             if [ "$label" = candidate ]; then image=sd-track-a; fi
             echo "Measuring $label cgroup memory.peak across five fresh runs" | tee -a /tmp/summary.txt
             peak=0
