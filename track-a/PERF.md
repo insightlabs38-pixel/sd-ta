@@ -190,3 +190,9 @@
 - Direct randomized 31-run full-input medians: six-worker champion `ff20736` **0.044322 s**, packed-only control **0.044519 s**, SIMD/lazy-scan candidate **0.049159 s**, **10.91% slower** than champion.
 - Five fresh Docker cgroup memory.peak samples: champion 15,233,024 / 5,906,432 / 5,890,048 / 5,914,624 / 6,881,280 bytes; candidate 5,738,496 / 5,541,888 / 6,631,424 / 6,721,536 / 5,562,368 bytes. Champion's first-run 15.2 MB is an outlier; median 5.91 MB versus candidate 5.74 MB. Candidate loses estimated K by roughly 5%, even before any source penalty.
 - **Rejected** SIMD/lazy-scan candidate; restored exact six-worker source blob `ea7cdf2a960168dd13a729baedca7ad3b990dde6`. The candidate is recoverable at `b6ce5ba`. Official six-P-core scoring remains outstanding.
+
+## Short-key isolation and small-group crossover, October 31
+
+- Isolated the short-key AVX2 equality branch in candidate `ccfc861`. On a local GCC 14.2 x86-64-v3 synthetic 3.1M-lookup Zipf mixture of 1,842 keys, 30 randomized trials gave old 17.427 ms versus candidate 25.159 ms median. This is an isolated synthetic benchmark, not a scored full-input comparison. Rejected the candidate and restored exact source blob `ea7cdf2a960168dd13a729baedca7ad3b990dde6` at `0eea733`.
+- Compared one full `std::sort` for groups of size at most 16 against three exact selections. Local 41-trial synthetic workload (131,008 groups, 3,090,598 latencies) gave selection-only medians 15.362 ms original versus 14.601 ms threshold-16, about 5.0% faster. All tested percentile checksums agreed; this does not replace official oracle or sanitizer validation.
+- Threshold-16 candidate `3e5a945` is **unqualified** pending official seed hashes, Docker/sanitizers and paired full-input T/M/S/D. Prior verified six-worker champion `ff20736` remains the integration recommendation until those gates pass. No official scoring-box result claimed.
