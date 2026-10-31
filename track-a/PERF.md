@@ -138,3 +138,11 @@
 - **Source size (scc 4.1.0 after clang-format LLVM).** main.cpp 433 code lines + Dockerfile 8 = S 441 (start champion: S 321, factor (321/441)^0.15 = 0.954).
 - **K estimate vs start champion from CI ratios** (T 0.42-0.47, M 41.0 -> 5.8-7.3 MB, S 441 vs 321): sqrt(1/0.45) * (41.0/6.5)^0.2 * 0.954 = 2.0x, i.e. ~48 from 23.9 on 4 vCPUs; the six-core/12-thread box should do better in T because the old champion used five workers. Estimates only; the official board decides.
 - **Lookahead and huge pages.** Lookahead is four blocks per thread (48 at 12 threads) so other thread counts keep the same slack. With transparent huge pages set to `always` the cgroup peak did not change (5.7-8.0 MB at 4 threads), so no `PR_SET_THP_DISABLE` call is needed.
+
+### Open ideas (not built; estimated gain vs cost)
+
+- Slice the last two hours by endpoint-rank range so idle threads help the ~1 ms tail (+3% T at 12 threads, ~35 lines, +4% CPU).
+- Claim hours by log-minute progress (hour end + 20 min) instead of two hours: ~0.3 MB less in flight, but only 10 minutes of margin before the exact fallback triggers.
+- `O_DIRECT` output with a writer thread: removes the output page cache from `memory.peak` (1-2 MB, and its timing variance) but risks wall time on slow disks and needs a staging buffer.
+- AVX2 compress-store partition for groups of 64+ values (selection is ~20 ms of ~125 ms single-thread CPU).
+- Measure on the six-core box: thread count (12 vs 6), `kStreams`, block size and the dictionary spin lock were tuned on a 4-vCPU Xeon.
