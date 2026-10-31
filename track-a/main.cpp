@@ -5,6 +5,7 @@
 // kLag hours past it. A late line that breaks this is detected when its block
 // is registered and the whole run is repeated without early finalization.
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <condition_variable>
 #include <cstdio>
@@ -79,6 +80,16 @@ void select(uint32_t *a, uint32_t lo, uint32_t hi, uint32_t k) {
   }
 }
 
+// Dictionary inserts are tiny and bursty at startup, so waiters spin instead of sleeping.
+struct SpinLock {
+  std::atomic_flag held;
+  void lock() {
+    for (int i = 0; held.test_and_set(std::memory_order_acquire); ++i)
+      if (i < 64) _mm_pause(); else sched_yield();
+  }
+  void unlock() { held.clear(std::memory_order_release); }
+};
+
 // Concurrent exact endpoint dictionary: 8-way buckets, lock-free hits, locked
 // inserts published by a release store of the tag. Keys are stored zero-padded
 // with a space after the last byte, so comparing n + 1 bytes proves equal length.
@@ -88,7 +99,7 @@ struct Names {
   alignas(64) char img[kIds][128] {};
   uint32_t len[kIds] {}, size = 0;
   std::vector<uint16_t> sorted;  // ids in byte order of their names
-  std::mutex mu;
+  SpinLock mu;
 
   bool same(uint32_t id, const char *ep, uint32_t n) const {
     auto eq = [&](int i) { return uint64_t(uint32_t(_mm256_movemask_epi8(_mm256_cmpeq_epi8(load(ep + i), load(img[id] + i))))) << i; };
@@ -114,7 +125,7 @@ struct Names {
     return id >= 0 ? id : add(ep, n, h);
   }
   uint32_t add(const char *ep, uint32_t n, uint32_t h) {
-    std::lock_guard<std::mutex> lock(mu);
+    std::lock_guard<SpinLock> lock(mu);
     Bucket *b;
     if (const int found = lookup(ep, n, h, b); found >= 0) return found;
     const uint32_t id = size++;
@@ -227,8 +238,9 @@ struct Job {
   void finalize(uint32_t hour) {
     std::vector<Run> mine;
     std::vector<uint16_t> order;
-    { std::scoped_lock lock(mu, names.mu);
+    { std::lock_guard<std::mutex> lock(mu);
       mine.swap(runs[hour]);
+      std::lock_guard<SpinLock> names_lock(names.mu);
       order = names.sorted; }
     uint32_t count[2 * kIds] = {}, pos[kIds], total = 0;  // by tag: ids, then their 5xx
     for (const auto &[rec, n] : mine)
@@ -343,7 +355,7 @@ int main() {
   if (fd < 0) fail("open summary");
   cpu_set_t cpus {};
   sched_getaffinity(0, sizeof cpus, &cpus);
-  const uint32_t threads = std::max(1, forced ? std::atoi(forced) : CPU_COUNT(&cpus));
+  const uint32_t threads = forced ? std::atoi(forced) : CPU_COUNT(&cpus);
   if (!std::make_unique<Job>(map, bytes, kLag, fd, threads)->run()) {
     if (ftruncate(fd, 0) || lseek(fd, 0, SEEK_SET)) fail("rewind summary");
     std::make_unique<Job>(map, bytes, kNever, fd, threads)->run();
