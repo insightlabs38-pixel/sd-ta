@@ -26,7 +26,8 @@ constexpr uint32_t kParseWorkers = 5;
 constexpr uint32_t kOutputWorkers = 5;
 constexpr uint8_t kMethodSkip[26] = {0, 0, 0, 7, 0, 0, 4, 5, 0, 0, 0, 0, 0, 0, 8};
 
-struct Record { uint32_t group, latency; };
+struct __attribute__((packed)) Record { uint32_t group : 24; uint32_t latency; };
+static_assert(sizeof(Record) == 7);
 struct Group { uint32_t count = 0, errors = 0, cursor = 0; };
 struct WorkerGroup { uint32_t count = 0, errors = 0; };
 struct Slot { uint32_t hash = 0, id_plus_one = 0; };
@@ -89,7 +90,7 @@ struct Worker {
 
   void parse(const char *p, const char *end) {
     names.reserve(kEndpoints);
-    records.reserve(static_cast<size_t>(end - p) / 73 + 128);
+    records.reserve(static_cast<size_t>(end - p) / 70 + 128);
     while (p < end) {
       const char *const line = p;
       const uint32_t hour = hour_index(p);
