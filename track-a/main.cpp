@@ -7,7 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
-#include <nmmintrin.h>
+#include <immintrin.h>
 #include <string>
 #include <string_view>
 #include <sys/mman.h>
@@ -46,6 +46,16 @@ __attribute__((target("sse4.2"))) uint32_t endpoint_hash(std::string_view name) 
   }
   const uint64_t mix = a ^ ((b << 17) | (b >> 47)) ^ ((c << 39) | (c >> 25));
   return _mm_crc32_u64(n, mix);
+}
+inline const char *endpoint_end(const char *p, const char *end) {
+  const __m256i spaces = _mm256_set1_epi8(' ');
+  while (end - p >= 32) {
+    const __m256i chunk = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p));
+    const uint32_t mask = static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, spaces)));
+    if (mask) return p + __builtin_ctz(mask);
+    p += 32;
+  }
+  return static_cast<const char *>(std::memchr(p, ' ', static_cast<size_t>(end - p)));
 }
 __attribute__((always_inline)) inline uint32_t intern(std::string_view name, std::array<Slot, 4096> &dictionary,
                 std::vector<std::string_view> &names) {
@@ -96,7 +106,7 @@ struct Worker {
       p += 28;
       p += *p == 'P' ? (p[1] == 'O' ? 5 : p[1] == 'U' ? 4 : 6) : kMethodSkip[*p - 'A'];
       const char *const endpoint = p;
-      p = static_cast<const char *>(std::memchr(p, ' ', static_cast<size_t>(end - p)));
+      p = endpoint_end(p, end);
       const std::string_view name(endpoint, static_cast<size_t>(p - endpoint));
       const uint32_t id = intern(name, dictionary, names);
       const bool error = p[1] == '5';
