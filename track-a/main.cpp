@@ -20,7 +20,7 @@
 #include <vector>
 
 namespace {
-constexpr uint32_t kHours = 72, kIds = 2048, kBlock = 256 << 10, kStreams = 4;
+constexpr uint32_t kHours = 72, kIds = 2048, kBlock = 256 << 10, kStreams = 2;
 constexpr uint32_t kLag = 2, kNever = 1000, kKeep = 2;
 constexpr uint32_t kMaxLine = 178, kRunCap = kBlock / 40 + 16, kPartCap = kIds * 256;
 const char *const kDays[] = {"2026-10-30", "2026-10-31", "2026-11-01",
@@ -375,8 +375,8 @@ struct Job {
                     std::malloc(kRunCap * sizeof(Rec) + sizeof(uint64_t)));
       }
     }
-    _mm_prefetch(p + 2560, _MM_HINT_T0);
-    _mm_prefetch(p + 2624, _MM_HINT_T0);
+    _mm_prefetch(p + 1280, _MM_HINT_T0);
+    _mm_prefetch(p + 1344, _MM_HINT_T0);
     const char *q = p + 28;
     uint64_t m = spaces(q) | uint64_t{spaces(q + 32)} << 32;
     const uint32_t k1 = __builtin_ctzll(m);
