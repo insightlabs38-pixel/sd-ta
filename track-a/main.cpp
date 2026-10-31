@@ -343,7 +343,7 @@ int main() {
   if (fd < 0) fail("open summary");
   cpu_set_t cpus {};
   sched_getaffinity(0, sizeof cpus, &cpus);
-  const uint32_t threads = forced ? std::atoi(forced) : CPU_COUNT(&cpus);
+  const uint32_t threads = std::max(1, forced ? std::atoi(forced) : CPU_COUNT(&cpus));
   if (!std::make_unique<Job>(map, bytes, kLag, fd, threads)->run()) {
     if (ftruncate(fd, 0) || lseek(fd, 0, SEEK_SET)) fail("rewind summary");
     std::make_unique<Job>(map, bytes, kNever, fd, threads)->run();
