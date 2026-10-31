@@ -138,6 +138,7 @@
 - **Source size (scc 4.1.0 after clang-format LLVM).** main.cpp 433 code lines + Dockerfile 8 = S 441 (start champion: S 321, factor (321/441)^0.15 = 0.954).
 - **K estimate vs start champion from CI ratios** (T 0.42-0.47, M 41.0 -> 5.8-7.3 MB, S 441 vs 321): sqrt(1/0.45) * (41.0/6.5)^0.2 * 0.954 = 2.0x, i.e. ~48 from 23.9 on 4 vCPUs; the six-core/12-thread box should do better in T because the old champion used five workers. Estimates only; the official board decides.
 - **Lookahead and huge pages.** Lookahead is four blocks per thread (48 at 12 threads) so other thread counts keep the same slack. With transparent huge pages set to `always` the cgroup peak did not change (5.7-8.0 MB at 4 threads), so no `PR_SET_THP_DISABLE` call is needed.
+- **Run [41182862751](https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41182862751)** (commit `e170a65`, final `main.cpp`): all gates pass; medians champion 0.103322 s, previous candidate 0.051032 s, candidate 0.047562 s (ratio 0.460); Docker cgroup peak 41,041,920 / 6,475,776 / 6,348,800 bytes.
 
 ### Open ideas (not built; estimated gain vs cost)
 
