@@ -48,7 +48,7 @@ __attribute__((target("sse4.2"))) uint32_t endpoint_hash(std::string_view name) 
   return _mm_crc32_u64(h, c);
 }
 __attribute__((always_inline)) inline uint32_t intern(std::string_view name, std::array<Slot, 4096> &dictionary,
-                std::vector<std::string_view> &names, std::vector<std::string> &storage) {
+                std::vector<std::string_view> &names) {
   const uint32_t hash = endpoint_hash(name);
   uint32_t pos = hash & 4095;
   while (dictionary[pos].id_plus_one &&
@@ -57,16 +57,9 @@ __attribute__((always_inline)) inline uint32_t intern(std::string_view name, std
   if (dictionary[pos].id_plus_one) return dictionary[pos].id_plus_one - 1;
   const uint32_t id = static_cast<uint32_t>(names.size());
   if (id >= kEndpoints) fail("too many endpoints");
-  storage.emplace_back(name);
-  names.emplace_back(storage.back());
+  names.push_back(name);
   dictionary[pos] = {hash, id + 1};
   return id;
-}
-void discard_pages(const char *begin, const char *end) {
-  constexpr uintptr_t mask = 4095;
-  const uintptr_t lo = (reinterpret_cast<uintptr_t>(begin) + mask) & ~mask;
-  const uintptr_t hi = reinterpret_cast<uintptr_t>(end) & ~mask;
-  if (hi > lo) madvise(reinterpret_cast<void *>(lo), hi - lo, MADV_DONTNEED);
 }
 uint32_t hour_index(const char *p) {
   const uint32_t day = (p[8] - '0') * 10 + (p[9] - '0');
@@ -89,7 +82,6 @@ void write_all(int fd, const std::string &out) {
 struct Worker {
   std::array<Slot, 4096> dictionary {};
   std::vector<std::string_view> names;
-  std::vector<std::string> storage;
   std::vector<WorkerGroup> groups = std::vector<WorkerGroup>(kHours * kLocalStride);
   std::array<std::array<char, 13>, kHours> hours {};
   std::array<uint8_t, kHours> seen {};
@@ -97,8 +89,6 @@ struct Worker {
 
   void parse(const char *p, const char *end) {
     names.reserve(kEndpoints);
-    storage.reserve(kEndpoints);
-    const char *release = p;
     records.reserve(static_cast<size_t>(end - p) / 70 + 128);
     while (p < end) {
       const char *const line = p;
@@ -108,7 +98,7 @@ struct Worker {
       const char *const endpoint = p;
       p = static_cast<const char *>(std::memchr(p, ' ', static_cast<size_t>(end - p)));
       const std::string_view name(endpoint, static_cast<size_t>(p - endpoint));
-      const uint32_t id = intern(name, dictionary, names, storage);
+      const uint32_t id = intern(name, dictionary, names);
       const bool error = p[1] == '5';
       p += 5;
       uint32_t latency = 0;
@@ -123,12 +113,7 @@ struct Worker {
         std::memcpy(hours[hour].data(), line, 13);
       }
       records.push_back({key, latency});
-      if (p - release >= 4 * 1024 * 1024) {
-        discard_pages(release, p);
-        release = p;
-      }
     }
-    discard_pages(release, end);
   }
 };
 } // namespace
@@ -165,9 +150,7 @@ int main() {
 
   std::array<Slot, 4096> dictionary {};
   std::vector<std::string_view> names;
-  std::vector<std::string> storage;
   names.reserve(kEndpoints);
-  storage.reserve(kEndpoints);
   std::vector<Group> groups(kGroups);
   std::array<std::array<char, 13>, kHours> hours {};
   std::vector<std::vector<uint32_t>> remaps(kParseWorkers);
@@ -175,7 +158,7 @@ int main() {
     Worker &worker = workers[w];
     remaps[w].reserve(worker.names.size());
     for (const std::string_view name : worker.names) {
-      const uint32_t id = intern(name, dictionary, names, storage);
+      const uint32_t id = intern(name, dictionary, names);
       remaps[w].push_back(id);
     }
     for (uint32_t hour = 0; hour < kHours; ++hour) {
@@ -194,7 +177,6 @@ int main() {
     group.cursor = prefix;
     prefix += group.count;
   }
-  std::vector<uint32_t> latencies(prefix);
   std::array<std::vector<uint32_t>, kParseWorkers> cursors;
   for (uint32_t w = 0; w < kParseWorkers; ++w) {
     cursors[w].assign(kGroups, 0);
@@ -204,7 +186,10 @@ int main() {
         cursors[w][key] = workers[w].groups[(hour << kLocalBits) | id].count;
       }
     }
+    workers[w].groups.clear();
+    workers[w].groups.shrink_to_fit();
   }
+  std::vector<uint32_t> latencies(prefix);
   for (uint32_t key = 0; key < kGroups; ++key) {
     uint32_t offset = groups[key].cursor;
     for (uint32_t w = 0; w < kParseWorkers; ++w) {
