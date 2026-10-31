@@ -305,7 +305,7 @@ struct Job {
 
   // Finalizes hours once they are safe and otherwise parses blocks, but never
   // more than kAhead blocks past the oldest unfinished one.
-  void work() {
+  void work(uint32_t index) {
     std::unique_lock<std::mutex> lock(mu);
     for (;;) {
       if (claimable()) {
@@ -320,6 +320,9 @@ struct Job {
         parse(block);
         lock.lock();
       } else if (next_hour >= kHours) {
+        lock.unlock();  // drop this thread's share of the file mapping so that exit is cheaper
+        const size_t slice = (size / threads + 4095) / 4096 * 4096, from = std::min(size, index * slice);
+        madvise(const_cast<char *>(base) + from, std::min(slice, size - from), MADV_DONTNEED);
         return;
       } else {
         cv.wait(lock);
@@ -328,7 +331,7 @@ struct Job {
   }
   bool run() {
     std::vector<std::thread> pool;
-    for (uint32_t i = 0; i < threads; ++i) pool.emplace_back([this] { work(); });
+    for (uint32_t i = 0; i < threads; ++i) pool.emplace_back([this, i] { work(i); });
     write_parts();
     for (auto &t : pool) t.join();
     return !bad;
