@@ -406,14 +406,8 @@ struct Job {
       }
       end[written + 1] = end[written] + part.second;
       sync_file_range(fd, end[written], part.second, SYNC_FILE_RANGE_WRITE);
-      if (written >= kKeep) {
-        const off_t cold = end[written - kKeep + 1];
-        if ((written & 7) == 0 || written + 1 == kHours)
-          sync_file_range(fd, 0, cold,
-                          SYNC_FILE_RANGE_WAIT_BEFORE | SYNC_FILE_RANGE_WRITE |
-                              SYNC_FILE_RANGE_WAIT_AFTER);
-        posix_fadvise(fd, 0, cold, POSIX_FADV_DONTNEED);
-      }
+      if (written >= kKeep)
+        posix_fadvise(fd, 0, end[written - kKeep + 1], POSIX_FADV_DONTNEED);
       {
         std::lock_guard<std::mutex> pool_lock(mu);
         outbufs.push_back(std::move(part.first));
