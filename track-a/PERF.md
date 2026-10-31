@@ -224,3 +224,11 @@
 - **Local evidence (4 vCPU Xeon, not the scoring box).** Seed-1 full, interleaved: main `961cf36` 0.052-0.060 s wall / 180 ms CPU; this build 0.036-0.039 s / 115 ms CPU. cgroup v1 peak with 4 workers 6-8 MB, 12 workers 13-15 MB. Seeds 1-3 full outputs match the reference.
 - **Rejected.** pread into per-thread buffers (+27 ms sys), MADV_POPULATE_READ per block (slower), branchless full-width key compare (7% slower), 8K/4K-slot private tables (no gain), dropping fadvise/sync_file_range (4% faster, +10 MB peak), smaller kAhead (no M change).
 - Rollback: `961cf36` (race-free, K=41.9 official), `2d60fab` (racy, not promotable).
+
+### Follow-up measurements (same session)
+
+- Lookahead bounded to two blocks per worker (was 48 blocks): 12-worker cgroup peak mean of 12 runs 15 -> 12 MB, time unchanged. Peak varies 9-23 MB between runs on the 4 vCPU box, mostly with output writeback timing and thread preemption, so single peaks say little.
+- Exit: workers release the input mapping in shared 4 MiB steps instead of fixed per-thread slices, so workers that are idle during the last hours absorb the zap cost; early block-group zapping (8/16/32 blocks) was slower (TLB shootdowns), as before.
+- Neutral, not kept: capping concurrent finalizations (3/5), a window on out-of-order hours (5/8), 128/512 KiB blocks (128 KiB +10% CPU), 2/3/4/6 interleaved streams, `-mtune`/`-funroll-loops`/`-O2`, skipping writeback calls for the last hour, fully unrolled stream loop (simulated mispredicts -40%, wall unchanged).
+- Output writeback syscalls (`write` + `sync_file_range` + `fadvise`) cost about 20 ms CPU of 115 but keep peak memory ~10 MB lower; O_DIRECT was not tried because a slow `/out` device would make every write synchronous.
+- Source: about 565 canonical code lines (clang-format LLVM, comments/blanks removed) versus 440 for `961cf36`; the CPU saving is worth roughly 25x the S penalty in K.
