@@ -20,6 +20,7 @@ jobs:
         run: |
           python tests/lengths.py "$PWD/solution"
           python tests/latencies.py "$PWD/solution"
+          python tests/groups.py "$PWD/solution"
       - name: Verify official seed-1 tiny, sample and full hashes
         shell: bash
         run: |
