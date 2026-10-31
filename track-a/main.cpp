@@ -347,10 +347,8 @@ struct Job {
                      r95 = (95 * n + 99) / 100 - 1,
                      r99 = (99 * n + 99) / 100 - 1;
       select(a, 0, n, r50);
-      if (n > 8) {
-        select(a, r50 + 1, n, r95);
-        select(a, r95 + 1, n, r99);
-      }
+      select(a, r50 + 1, n, r95);
+      select(a, r95 + 1, n, r99);
       std::memcpy(out, label, 21);
       std::memcpy(out + 21, names.img[id], names.len[id]);
       out += 21 + names.len[id];
