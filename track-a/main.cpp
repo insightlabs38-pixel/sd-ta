@@ -101,7 +101,7 @@ void select(uint32_t *a, uint32_t lo, uint32_t hi, uint32_t k) {
 // Dictionary inserts are tiny and bursty at startup, so waiters spin instead of
 // sleeping.
 struct SpinLock {
-  std::atomic_flag held;
+  std::atomic_flag held = ATOMIC_FLAG_INIT;
   void lock() {
     for (int i = 0; held.test_and_set(std::memory_order_acquire); ++i)
       if (i < 64)
@@ -141,12 +141,15 @@ struct Names {
   int lookup(const char *ep, uint32_t n, uint32_t h, Bucket *&b) {
     for (uint32_t i = h >> 16;; ++i) {
       b = buckets + (i & 511);
+      uint32_t tags[8];
+      for (uint32_t lane = 0; lane < 8; ++lane)
+        tags[lane] = __atomic_load_n(&b->tag[lane], __ATOMIC_ACQUIRE);
       uint32_t m = _mm256_movemask_ps(_mm256_castsi256_ps(
-          _mm256_cmpeq_epi32(load(b->tag), _mm256_set1_epi32(h))));
+          _mm256_cmpeq_epi32(load(tags), _mm256_set1_epi32(h))));
       for (; m; m &= m - 1)
         if (same(b->id[__builtin_ctz(m)], ep, n))
           return b->id[__builtin_ctz(m)];
-      if (!b->tag[7])
+      if (!tags[7])
         return -1;
     }
   }
@@ -166,7 +169,7 @@ struct Names {
       return found;
     const uint32_t id = size++;
     uint32_t slot = 0;
-    while (b->tag[slot])
+    while (__atomic_load_n(&b->tag[slot], __ATOMIC_RELAXED))
       ++slot;
     if (id >= kIds)
       fail("too many endpoints");
@@ -260,7 +263,7 @@ struct Job {
     if (!w) {
       Rec *r = take(runbufs);
       w = bp[hour] =
-          r ? r : static_cast<Rec *>(std::malloc(kRunCap * sizeof(Rec)));
+          r ? r : static_cast<Rec *>(std::malloc(kRunCap * sizeof(Rec) + sizeof(uint64_t)));
     }
     const uint64_t rec = lat | uint64_t{id | error << 11} << 32;
     std::memcpy(w++, &rec, 8); // the next record overwrites the 2 spare bytes
