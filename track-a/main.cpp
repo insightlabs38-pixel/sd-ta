@@ -327,6 +327,7 @@ struct Job {
   off_t end[kHours + 1]{}; // output offset after each hour
   uint32_t written = 0;    // hours written so far
   bool writing = false;
+  std::atomic<size_t> zapped{0}; // 4 MiB steps of the mapping released
   std::vector<Rec *> runbufs; // free buffers, guarded by mu
   std::vector<std::vector<int32_t>> latbufs;
   std::vector<std::unique_ptr<char[]>> outbufs;
@@ -566,12 +567,12 @@ struct Job {
         parse(*local, block);
         lock.lock();
       } else if (next_hour >= kHours) {
-        lock.unlock(); // drop this thread's share of the file mapping so that
+        lock.unlock(); // drop the file mapping in shared 4 MiB steps so that
                        // exit is cheaper
-        const size_t slice = (size / threads + 4095) / 4096 * 4096,
-                     from = std::min(size, index * slice);
-        madvise(const_cast<char *>(base) + from, std::min(slice, size - from),
-                MADV_DONTNEED);
+        constexpr size_t kStep = 4 << 20;
+        for (size_t at; (at = zapped++ * kStep) < size;)
+          madvise(const_cast<char *>(base) + at, std::min(kStep, size - at),
+                  MADV_DONTNEED);
         return;
       } else {
         cv.wait(lock);
