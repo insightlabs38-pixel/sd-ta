@@ -199,5 +199,5 @@
 
 ## Official promotion — 2026-10-31
 
-- The streaming hour-epoch source blob `2d60fab7bc533d01c31167ca0cd5d66216013ec9` was promoted to `sd-sm` commit `8298e2cbe0d21ffd4688bb23b625f988fdd4128`. Official run `run-b447dc4b353e` passed all five gates with T=0.020573 s, M=21,041,152 B, S=441, D=1, K=46.641863 and 83.438795 points. This beats the prior BEST `run-2e35ec2bc727` (K=44.826321) by 4.05%.
+- The streaming hour-epoch source blob `2d60fab7bc533d01c31167ca0cd5d66216013ec9` was promoted to `sd-sm` commit `8298e2cbe0d21ffd4688bb23b625f988fdd4128d`. Official run `run-b447dc4b353e` passed all five gates with T=0.020573 s, M=21,041,152 B, S=441, D=1, K=46.641863 and 83.438795 points. This beats the prior BEST `run-2e35ec2bc727` (K=44.826321) by 4.05%.
 - Official evidence and rollback state are recorded in the submission repository; the prior dev main source remains recoverable in its Git history.
