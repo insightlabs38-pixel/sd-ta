@@ -147,18 +147,6 @@ void sort16(const int32_t *a, uint32_t n, int32_t *out) {
 // level (b is scratch of the same size).
 void multiselect(int32_t *a, int32_t *b, uint32_t lo, uint32_t hi,
                  const uint32_t *k, int nk, int32_t *out, int depth = 0) {
-  if (hi - lo <= 8) {
-    const __m256i lanes = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
-    const __m256i count = _mm256_set1_epi32(hi - lo);
-    const __m256i x = _mm256_blendv_epi8(
-        _mm256_set1_epi32(INT32_MAX), load(a + lo),
-        _mm256_cmpgt_epi32(count, lanes));
-    alignas(32) int32_t sorted[8];
-    _mm256_store_si256((__m256i *)sorted, sort8(x));
-    for (int i = 0; i < nk; ++i)
-      out[i] = sorted[k[i] - lo];
-    return;
-  }
   if (hi - lo <= 16) {
     alignas(32) int32_t sorted[16];
     sort16(a + lo, hi - lo, sorted);
