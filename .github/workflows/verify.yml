@@ -49,8 +49,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --depth=1 origin 388406ca0dcd93516dc292fc2cbe2789c599ff5d
-          git show 388406ca0dcd93516dc292fc2cbe2789c599ff5d:track-a/main.cpp > /tmp/a-prev.cpp
+          git fetch --depth=1 origin 4f39ecbf78b97158510863d8d11528fc333abb9e
+          git show 4f39ecbf78b97158510863d8d11528fc333abb9e:track-a/main.cpp > /tmp/a-prev.cpp
           g++ -O3 -std=c++20 -DNDEBUG -pthread -static-libstdc++ -static-libgcc -o /tmp/a-prev /tmp/a-prev.cpp
           g++ -O3 -march=x86-64-v3 -std=c++20 -DNDEBUG -pthread -static-libstdc++ -static-libgcc -o /tmp/a-prev-v3 /tmp/a-prev.cpp
           git fetch --depth=1 origin 59a73a7c2d85d3f396313de528defafb82465572
