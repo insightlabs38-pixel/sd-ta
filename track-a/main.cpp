@@ -42,15 +42,12 @@ uint32_t far_space(const char *q) {
   while (!(m = spaces(q + k))) k += 32;
   return k + __builtin_ctz(m);
 }
-// Bytes 0..31 below k are set.
-__m256i below(uint32_t k) {
-  const __m256i iota = _mm256_setr_epi64x(0x0706050403020100, 0x0f0e0d0c0b0a0908, 0x1716151413121110, 0x1f1e1d1c1b1a1918);
-  return _mm256_cmpgt_epi8(_mm256_set1_epi8(static_cast<char>(k)), iota);
-}
+// The value of eight decimal digits (0..9 per byte, most significant first).
 uint64_t digits8(uint64_t v) {
-  v = (v & 0x0F0F0F0F0F0F0F0F) * 2561 >> 8;
-  v = (v & 0x00FF00FF00FF00FF) * 6553601 >> 16;
-  return (v & 0x0000FFFF0000FFFF) * 42949672960001 >> 32;
+  __m128i x = _mm_maddubs_epi16(_mm_cvtsi64_si128(v), _mm_set1_epi16(0x010a));
+  x = _mm_madd_epi16(x, _mm_set1_epi32(0x00010064));
+  const uint64_t r = _mm_cvtsi128_si64(x);
+  return (r & 0xffffffff) * 10000 + (r >> 32);
 }
 
 // Places the k-th smallest of a[lo, hi) at a[k], smaller values before it and
@@ -94,11 +91,8 @@ struct Names {
   std::mutex mu;
 
   bool same(uint32_t id, const char *ep, uint32_t n) const {
-    const uint32_t k = n + 1;
-    const __m256i d0 = _mm256_xor_si256(load(ep), load(img[id]));
-    const __m256i d1 = _mm256_xor_si256(load(ep + 32), load(img[id] + 32));
-    return _mm256_testz_si256(d0, below(std::min(k, 32u))) &&
-           _mm256_testz_si256(d1, below(std::min(std::max(k, 32u) - 32, 32u))) &&
+    auto eq = [&](int i) { return uint64_t(uint32_t(_mm256_movemask_epi8(_mm256_cmpeq_epi8(load(ep + i), load(img[id] + i))))) << i; };
+    return !_bzhi_u64(~(eq(0) | eq(32)), n + 1) &&
            (n < 64 || (len[id] == n && !std::memcmp(img[id] + 64, ep + 64, n - 64)));
   }
   // The id of the key, or -1 with b set to the bucket it belongs in.
