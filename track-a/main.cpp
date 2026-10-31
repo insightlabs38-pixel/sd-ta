@@ -1,9 +1,7 @@
 // Track A: per-hour, per-endpoint request counts, p50/p95/p99 and 5xx rates.
-//
-// The log is nearly time-ordered, so its blocks are parsed into per-hour runs
-// and an hour is finalized as soon as the finished prefix of the file has moved
-// kLag hours past it. A late line that breaks this is detected when its block
-// is registered and the whole run is repeated without early finalization.
+// The log is nearly time-ordered: blocks are parsed into per-hour runs and an
+// hour is finalized once the finished file prefix is kLag hours past it.
+// A late line that breaks this is detected and the run is repeated exactly.
 #include <algorithm>
 #include <atomic>
 #include <charconv>
@@ -52,7 +50,7 @@ uint64_t digits8(uint64_t v) {
 }
 
 // Places the k-th smallest of a[lo, hi) at a[k], smaller values before it and
-// larger ones after (branchless Lomuto partitions; ranges <= 16 are sorted).
+// larger ones after (branchless Lomuto partitions; ranges <= 8 are sorted).
 void select(uint32_t *a, uint32_t lo, uint32_t hi, uint32_t k) {
   for (int depth = 0; hi - lo > 8; ++depth) {
     if (depth > 48) return std::nth_element(a + lo, a + k, a + hi);
@@ -90,9 +88,9 @@ struct SpinLock {
   void unlock() { held.clear(std::memory_order_release); }
 };
 
-// Concurrent exact endpoint dictionary: 8-way buckets, lock-free hits, locked
-// inserts published by a release store of the tag. Keys are stored zero-padded
-// with a space after the last byte, so comparing n + 1 bytes proves equal length.
+// Exact endpoint dictionary: 8-way buckets, lock-free hits, locked inserts
+// published by a release store of the tag (relies on x86 load ordering).
+// Keys are stored zero-padded after a space, so n + 1 equal bytes prove equality.
 struct Names {
   struct alignas(64) Bucket { uint32_t tag[8]; uint16_t id[8]; };
   Bucket buckets[512] {};
