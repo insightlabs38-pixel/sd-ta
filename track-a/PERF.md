@@ -168,3 +168,11 @@
 - [CI 41200171027](https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41200171027) passed all correctness, seed, ASan/UBSan, TSan, Docker allowlist, offline-build and restricted-runtime gates for the new default. Paired 31-run full medians were 0.041953 s for the previous champion and 0.041843 s for the candidate (0.26% faster).
 - Five-run cgroup peaks for the previous champion were 7,045,120/14,061,568/6,397,952/6,926,336/5,750,784 bytes; candidate 6,131,712/5,844,992/7,516,160/6,135,808/6,152,192 bytes. Medians improve 6.93 to 6.14 MB; the prior 14.06 MB maximum is an outlier, so maximum-based gains must not be treated as stable.
 - With unchanged S/D, paired median T and median M imply about **+2.6% CI-proxy K**. This is not an official six-P-core K measurement; the 4/6/12-worker tradeoff should be checked on scoring hardware before final integration. Previous exact source remains recoverable at `d9680bd`.
+
+## 32-bit output formatting and local negative controls, October 31
+
+- Candidate `3524f05` used 32-bit `to_chars` for every output field, retaining 64-bit intermediate arithmetic for error ppm. Independently verified 2,000,000 random/boundary integers and 1,000,000 error-rate calculations against the original 64-bit formatter.
+- [CI 41203844469](https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41203844469) passed official seed-1 tiny/sample/full hashes, seed-2/3 reference differential, reordered input, ASan/UBSan, TSan, and restricted offline Docker.
+- Direct 31-run full-input medians on four-vCPU CI: qualified six-worker champion **0.042887 s**, candidate **0.043311 s** (0.99% slower). Five-run maximum cgroup peaks **6,283,264** versus **6,602,752 bytes** (5.08% higher). Estimated K proxy approximately **1.4% lower**, even with one fewer source line and unchanged D. Rejected.
+- Local isolated microbenchmarks did not justify promoting branchy 32-byte endpoint comparisons, grammar-branch method scanning, custom decimal-pair formatting, or alternative non-CRC hashes. The isolated 32-bit formatter was slightly faster but lost end-to-end.
+- Restored the exact qualified six-worker source blob `ea7cdf2a960168dd13a729baedca7ad3b990dde6` from `f1e501c`. The CI workflow now compares future candidates directly against the verified six-worker implementation `ff20736`. Official six-core score remains outstanding.
