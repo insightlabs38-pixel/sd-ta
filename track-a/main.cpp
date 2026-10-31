@@ -62,9 +62,8 @@ __attribute__((always_inline)) inline uint32_t intern(std::string_view name, std
   return id;
 }
 uint32_t hour_index(const char *p) {
-  const uint32_t day = (p[8] - '0') * 10 + (p[9] - '0');
-  const uint32_t hour = (p[11] - '0') * 10 + (p[12] - '0');
-  return p[6] == '0' ? (day - 30) * 24 + hour - 18 : 30 + (day - 1) * 24 + hour;
+  return ((p[9] - '0') + (p[6] == '1')) * 24 +
+         (p[11] - '0') * 10 + (p[12] - '0') - 18;
 }
 void append_number(std::string &out, uint64_t value) {
   char buffer[24];
