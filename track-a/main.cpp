@@ -20,7 +20,7 @@
 namespace {
 constexpr uint32_t kHours = 72, kIds = 2048, kBlock = 256 << 10;
 constexpr uint32_t kStreams = 4;
-constexpr uint32_t kRunCap = kBlock / 40 + 16, kLag = 2, kNever = 1000;
+constexpr uint32_t kRunCap = kBlock / 40 + 16, kLag = 2, kNever = 1000, kKeep = 2;
 
 struct __attribute__((packed)) Rec { uint32_t lat; uint16_t tag; };  // tag: id | error << 11
 struct Run { Rec *rec; uint32_t n; };
@@ -161,12 +161,12 @@ struct Job {
   int fd;
   Names names;
   std::mutex mu, out_mu;
-  std::condition_variable cv;
+  std::condition_variable cv, out_cv;
   std::atomic<uint32_t> next_block {0};
   std::vector<Run> runs[kHours];
   std::vector<Rec *> pool;
   std::vector<uint8_t> done, block_max;
-  uint32_t watermark = 0, prefix_max = 0, registered = 0, next_hour = 0, written = 0;
+  uint32_t watermark = 0, prefix_max = 0, registered = 0, next_hour = 0;
   bool bad = false;
   Part parts[kHours];
   bool ready[kHours] {};
@@ -334,13 +334,26 @@ struct Job {
     std::lock_guard<std::mutex> lock(out_mu);
     parts[hour] = std::move(part);
     ready[hour] = true;
-    for (; written < kHours && ready[written]; ++written) {
-      for (size_t off = 0; off < parts[written].size;) {
-        const ssize_t w = write(fd, parts[written].data.get() + off, parts[written].size - off);
+    out_cv.notify_one();
+  }
+
+  // Writes the hours in order, starts their writeback and drops older cached
+  // output pages (best effort) so the page cache stays small.
+  void write_parts() {
+    off_t end[kHours + 1] {};
+    for (uint32_t h = 0; h < kHours; ++h) {
+      Part part;
+      { std::unique_lock<std::mutex> lock(out_mu);
+        out_cv.wait(lock, [&] { return ready[h]; });
+        part = std::move(parts[h]); }
+      for (size_t off = 0; off < part.size;) {
+        const ssize_t w = write(fd, part.data.get() + off, part.size - off);
         if (w <= 0) fail("write summary");
         off += static_cast<size_t>(w);
       }
-      parts[written].data.reset();
+      end[h + 1] = end[h] + static_cast<off_t>(part.size);
+      sync_file_range(fd, end[h], end[h + 1] - end[h], SYNC_FILE_RANGE_WRITE);
+      if (h >= kKeep) posix_fadvise(fd, 0, end[h - kKeep + 1], POSIX_FADV_DONTNEED);
     }
   }
 
@@ -363,8 +376,8 @@ struct Job {
   }
   bool run() {
     std::vector<std::thread> pool_threads;
-    for (uint32_t i = 1; i < threads; ++i) pool_threads.emplace_back([this] { work(); });
-    work();
+    for (uint32_t i = 0; i < threads; ++i) pool_threads.emplace_back([this] { work(); });
+    write_parts();
     for (auto &t : pool_threads) t.join();
     return !bad;
   }
