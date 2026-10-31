@@ -17,7 +17,9 @@ jobs:
       - name: Differential synthetic tests
         run: python tests/synthetic.py "$PWD/solution"
       - name: Endpoint length differential
-        run: python tests/lengths.py "$PWD/solution"
+        run: |
+          python tests/lengths.py "$PWD/solution"
+          python tests/latencies.py "$PWD/solution"
       - name: Verify official seed-1 tiny, sample and full hashes
         shell: bash
         run: |
