@@ -21,7 +21,7 @@
 
 namespace {
 constexpr uint32_t kHours = 72, kIds = 2048, kBlock = 256 << 10, kStreams = 4;
-constexpr uint32_t kLag = 2, kNever = 1000, kAhead = 48, kKeep = 2;
+constexpr uint32_t kLag = 2, kNever = 1000, kKeep = 2;
 constexpr uint32_t kRunCap = kBlock / 40 + 16, kPartCap = kIds * 256;
 const char *const kDays[] = {"2026-10-30", "2026-10-31", "2026-11-01",
                              "2026-11-02"};
@@ -406,7 +406,7 @@ struct Job {
   }
 
   // Finalizes hours once they are safe and otherwise parses blocks, but never
-  // more than kAhead blocks past the oldest unfinished one.
+  // more than 4 blocks per thread past the oldest unfinished one.
   void work(uint32_t index) {
     std::unique_lock<std::mutex> lock(mu);
     for (;;) {
@@ -416,7 +416,7 @@ struct Job {
         lock.unlock();
         finalize(hour);
         lock.lock();
-      } else if (next_block < nblocks && next_block < watermark + kAhead) {
+      } else if (next_block < nblocks && next_block < watermark + 4 * threads) {
         const uint32_t block = next_block++;
         lock.unlock();
         parse(block);
