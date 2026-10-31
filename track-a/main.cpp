@@ -322,7 +322,7 @@ struct Job {
       total += count[id] + count[id + kIds];
     }
     std::vector<uint32_t> lat = take(latbufs);
-    lat.reserve(1 << 17);
+    lat.reserve(1 << 16);
     lat.resize(total);
     for (const auto &[rec, n] : mine)
       for (uint32_t i = 0; i < n; ++i)
