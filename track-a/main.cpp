@@ -128,6 +128,11 @@ struct Names {
   SpinLock mu;
 
   bool same(uint32_t id, const char *ep, uint32_t n) const {
+    if (n < 32) {
+      const uint32_t match = _mm256_movemask_epi8(
+          _mm256_cmpeq_epi8(load(ep), load(img[id])));
+      return !_bzhi_u32(~match, n + 1);
+    }
     auto eq = [&](int i) {
       return uint64_t(uint32_t(_mm256_movemask_epi8(
                  _mm256_cmpeq_epi8(load(ep + i), load(img[id] + i)))))
