@@ -22,7 +22,7 @@
 namespace {
 constexpr uint32_t kHours = 72, kIds = 2048, kBlock = 256 << 10, kStreams = 4;
 constexpr uint32_t kLag = 2, kNever = 1000, kAhead = 48, kKeep = 2;
-constexpr uint32_t kRunCap = kBlock / 40 + 16, kPartCap = kIds * 256;
+constexpr uint32_t kMaxLine = 178, kRunCap = kBlock / 40 + 16, kPartCap = kIds * 256;
 const char *const kDays[] = {"2026-10-30", "2026-10-31", "2026-11-01",
                              "2026-11-02"};
 
@@ -65,37 +65,84 @@ uint64_t digits8(uint64_t v) {
   return (r & 0xffffffff) * 10000 + (r >> 32);
 }
 
-// Places the k-th smallest of a[lo, hi) at a[k], smaller values before it and
-// larger ones after (branchless Lomuto partitions; ranges <= 8 are sorted).
-void select(uint32_t *a, uint32_t lo, uint32_t hi, uint32_t k) {
-  for (int depth = 0; hi - lo > 8; ++depth) {
-    if (depth > 48)
-      return std::nth_element(a + lo, a + k, a + hi);
-    const uint32_t x = a[lo], y = a[lo + (hi - lo) / 2], z = a[hi - 1];
-    const uint32_t pivot =
-        std::max(std::min(x, y), std::min(std::max(x, y), z));
-    auto split = [&](auto before) {
-      uint32_t j = lo;
-      for (uint32_t i = lo; i < hi; ++i) {
-        const uint32_t v = a[i];
-        a[i] = a[j];
-        a[j] = v;
-        j += before(v);
-      }
-      return j;
+// Lane permutations that compress the lanes of an 8-bit mask to the bottom
+// (kLow) or, for the lanes outside the mask, to the top (kHigh) of a vector.
+struct Lanes {
+  uint8_t low[256][8]{}, high[256][8]{};
+  constexpr Lanes() {
+    for (int m = 0; m < 256; ++m)
+      for (int lane = 0, in = 0, out = 0; lane < 8; ++lane)
+        if (m >> lane & 1)
+          low[m][in++] = lane;
+        else
+          high[m][__builtin_popcount(m) + out++] = lane;
+  }
+};
+constexpr Lanes kLanes;
+
+// Copies src[lo, hi) to dst so that the values below pivot come first; returns
+// how many there are. Values are int32 (latencies with the sign bit flipped).
+uint32_t split(const int32_t *src, int32_t *dst, uint32_t lo, uint32_t hi,
+               int32_t pivot) {
+  const __m256i bound = _mm256_set1_epi32(pivot);
+  uint32_t i = lo, l = lo, r = hi;
+  for (; hi - i >= 16; i += 8) {
+    const __m256i v = load(src + i);
+    const uint32_t m = _mm256_movemask_ps(
+        _mm256_castsi256_ps(_mm256_cmpgt_epi32(bound, v)));
+    auto lanes = [&](const uint8_t *idx) {
+      return _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i *)idx));
     };
-    uint32_t j = split([&](uint32_t v) { return v < pivot; });
-    if (j == lo && k < (j = split([&](uint32_t v) { return v == pivot; })))
-      return; // all duplicates
-    (k < j ? hi : lo) = j;
+    _mm256_storeu_si256((__m256i *)(dst + l),
+                        _mm256_permutevar8x32_epi32(v, lanes(kLanes.low[m])));
+    _mm256_storeu_si256((__m256i *)(dst + r - 8),
+                        _mm256_permutevar8x32_epi32(v, lanes(kLanes.high[m])));
+    l += __builtin_popcount(m);
+    r -= 8 - __builtin_popcount(m);
   }
-  for (uint32_t i = lo + 1; i < hi; ++i) {
-    const uint32_t v = a[i];
-    uint32_t m = i;
-    for (; m > lo && a[m - 1] > v; --m)
-      a[m] = a[m - 1];
-    a[m] = v;
+  for (; i < hi; ++i) {
+    const int32_t v = src[i];
+    dst[l] = dst[r - 1] = v;
+    l += v < pivot;
+    r -= v >= pivot;
   }
+  return l - lo;
+}
+
+// Stores the values at the sorted positions k[0..nk) of a[lo, hi) into out;
+// the positions are ascending and inside the range. a and b swap roles at each
+// level (b is scratch of the same size).
+void multiselect(int32_t *a, int32_t *b, uint32_t lo, uint32_t hi,
+                 const uint32_t *k, int nk, int32_t *out, int depth = 0) {
+  if (hi - lo <= 16 || depth > 40) {
+    std::sort(a + lo, a + hi);
+    for (int i = 0; i < nk; ++i)
+      out[i] = a[k[i]];
+    return;
+  }
+  const int32_t x = a[lo], y = a[lo + (hi - lo) / 2], z = a[hi - 1];
+  int32_t pivot = std::max(std::min(x, y), std::min(std::max(x, y), z));
+  uint32_t cut = lo + split(a, b, lo, hi, pivot);
+  if (cut == lo) { // pivot is the minimum: peel off its duplicates
+    if (pivot == INT32_MAX) {
+      std::fill(out, out + nk, pivot);
+      return;
+    }
+    cut = lo + split(a, b, lo, hi, pivot + 1);
+    for (int i = 0; i < nk && k[i] < cut; ++i)
+      out[i] = pivot;
+    if (cut == hi)
+      return;
+    int done = std::lower_bound(k, k + nk, cut) - k;
+    if (done < nk)
+      multiselect(b, a, cut, hi, k + done, nk - done, out + done, depth + 1);
+    return;
+  }
+  const int left = std::lower_bound(k, k + nk, cut) - k;
+  if (left)
+    multiselect(b, a, lo, cut, k, left, out, depth + 1);
+  if (left < nk)
+    multiselect(b, a, cut, hi, k + left, nk - left, out + left, depth + 1);
 }
 
 // Dictionary inserts are tiny and bursty at startup, so waiters spin instead of
@@ -136,36 +183,22 @@ struct Names {
   }
 };
 
-struct alignas(64) Bucket {
-  uint32_t tag[8];
-  uint16_t id[8];
-};
-struct Local { // one worker's view of the dictionary
-  Bucket buckets[512]{};
+struct Local { // one worker's private open-addressing view of the dictionary
+  static constexpr uint32_t kSlots = 1 << 14;
+  uint16_t slot[kSlots]{}; // id + 1, or 0 when free
   uint32_t synced = 0;
 
   void put(uint32_t h, uint32_t id) {
-    Bucket *b = buckets + (h >> 16 & 511);
-    while (b->tag[7])
-      b = buckets + ((b - buckets + 1) & 511);
-    uint32_t slot = 0;
-    while (b->tag[slot])
-      ++slot;
-    b->id[slot] = id;
-    b->tag[slot] = h;
+    uint32_t i = h >> 18;
+    while (slot[i])
+      i = (i + 1) % kSlots;
+    slot[i] = id + 1;
   }
   int lookup(const Names &names, const char *ep, uint32_t n, uint32_t h) const {
-    const __m256i want = _mm256_set1_epi32(h);
-    for (uint32_t i = h >> 16;; ++i) {
-      const Bucket *b = buckets + (i & 511);
-      uint32_t m = _mm256_movemask_ps(
-          _mm256_castsi256_ps(_mm256_cmpeq_epi32(load(b->tag), want)));
-      for (; m; m &= m - 1)
-        if (names.same(b->id[__builtin_ctz(m)], ep, n))
-          return b->id[__builtin_ctz(m)];
-      if (!b->tag[7])
-        return -1;
-    }
+    for (uint32_t i = h >> 18; slot[i]; i = (i + 1) % kSlots)
+      if (names.same(slot[i] - 1, ep, n))
+        return slot[i] - 1;
+    return -1;
   }
   // Copies the log entries published since the last visit.
   void sync(const Names &names) {
@@ -205,11 +238,38 @@ struct Local { // one worker's view of the dictionary
     const uint64_t keep = n < 8 ? n * 8 : 64;
     const uint64_t x = _bzhi_u64(load64(ep), keep),
                    y = _bzhi_u64(load64(ep + std::max(n, 8u) - 8), keep);
-    const uint32_t h = _mm_crc32_u64(_mm_crc32_u64(n, x), y) | 1;
+    const uint32_t h = _mm_crc32_u64(_mm_crc32_u64(n, x), y);
     const int id = lookup(names, ep, n, h);
     return id >= 0 ? id : add(names, ep, n, h);
   }
 };
+
+// Where a stream appends: the hour of its previous line is remembered.
+struct Stream {
+  const char *pos, *stop;
+  uint64_t date = 0; // bytes 5..12 of the previous line
+  Rec **at = nullptr;
+};
+
+// The eight decimal digits of v < 10^8 as bytes 0..9, most significant first.
+uint64_t digits_of(uint32_t v) {
+  uint64_t x = v / 10000 | uint64_t{v % 10000} << 32;
+  uint64_t q = (x * 5243 >> 19) & 0x0000007f0000007f;
+  x = q | (x - q * 100) << 16;
+  q = (x * 103 >> 10) & 0x000f000f000f000f;
+  return q | (x - q * 10) << 8;
+}
+// Appends a space and v; 16 bytes of slack must follow.
+char *put(char *out, uint32_t v) {
+  *out++ = ' ';
+  if (v >= 100000000)
+    return std::to_chars(out, out + 10, v).ptr;
+  const uint64_t d = digits_of(v);
+  const uint32_t skip = __builtin_ctzll(d | uint64_t{1} << 56) / 8;
+  const uint64_t text = (d + 0x3030303030303030) >> 8 * skip;
+  std::memcpy(out, &text, 8);
+  return out + 8 - skip;
+}
 
 struct Job {
   const char *base;
@@ -229,7 +289,7 @@ struct Job {
   uint32_t written = 0;    // hours written so far
   bool writing = false;
   std::vector<Rec *> runbufs; // free buffers, guarded by mu
-  std::vector<std::vector<uint32_t>> latbufs;
+  std::vector<std::vector<int32_t>> latbufs;
   std::vector<std::unique_ptr<char[]>> outbufs;
 
   Job(const char *b, size_t n, uint32_t l, int f, uint32_t t)
@@ -259,10 +319,24 @@ struct Job {
                  : base;
   }
 
-  // Parses one line and returns the next; 256 readable bytes must follow p.
-  __attribute__((always_inline)) const char *
-  line(Local &local, const char *p, Rec *(&wp)[kHours], Rec *(&bp)[kHours]) {
-    const uint32_t hour = (p[9] + (p[6] & 1)) * 24 + p[11] * 10 + p[12] - 1698;
+  // Parses one line of the stream; 256 readable bytes must follow it.
+  __attribute__((always_inline)) void line(Local &local, Stream &st,
+                                           Rec *(&wp)[kHours],
+                                           Rec *(&bp)[kHours]) {
+    const char *p = st.pos;
+    if (const uint64_t date = load64(p + 5); date != st.date) {
+      st.date = date;
+      st.at = wp + (p[9] + (p[6] & 1)) * 24 + p[11] * 10 + p[12] - 1698;
+      if (!*st.at) {
+        Rec *r = take(runbufs);
+        *st.at = bp[st.at - wp] =
+            r ? r
+              : static_cast<Rec *>(
+                    std::malloc(kRunCap * sizeof(Rec) + sizeof(uint64_t)));
+      }
+    }
+    _mm_prefetch(p + 1280, _MM_HINT_T0);
+    _mm_prefetch(p + 1344, _MM_HINT_T0);
     const char *q = p + 28;
     uint64_t m = spaces(q) | uint64_t{spaces(q + 32)} << 32;
     const uint32_t k1 = __builtin_ctzll(m);
@@ -282,35 +356,34 @@ struct Job {
       for (lat = digits8(v), s += 8; *s != '\n'; ++s)
         lat = lat * 10 + (*s - '0');
     }
-    Rec *&w = wp[hour];
-    if (!w) {
-      Rec *r = take(runbufs);
-      w = bp[hour] =
-          r ? r : static_cast<Rec *>(std::malloc(kRunCap * sizeof(Rec) + sizeof(uint64_t)));
-    }
     const uint64_t rec = lat | uint64_t{id | error << 11} << 32;
-    std::memcpy(w++, &rec, sizeof(Rec));
-    return s + 1;
+    std::memcpy((*st.at)++, &rec, sizeof(Rec));
+    st.pos = s + 1;
   }
 
   void parse(Local &local, uint32_t block) {
     Rec *wp[kHours]{}, *bp[kHours]{};
-    const char *pos[kStreams],
-        *stop[kStreams]; // interleaved streams overlap their latencies
+    Stream st[kStreams]; // interleaved streams overlap their latencies
     const char *p = align(block), *end = align(block + 1);
-    for (uint32_t i = 0; i < kStreams; ++i)
-      pos[i] = i ? next_line(p + (end - p) * i / kStreams) : p;
-    std::copy(pos + 1, pos + kStreams, stop);
-    stop[kStreams - 1] = end;
-    auto live = [&] {
-      return std::equal(pos, pos + kStreams, stop, std::less<>());
-    };
-    while (live())
-      for (uint32_t i = 0; i < kStreams; ++i)
-        pos[i] = line(local, pos[i], wp, bp);
-    for (uint32_t i = 0; i < kStreams; ++i)
-      while (pos[i] < stop[i])
-        pos[i] = line(local, pos[i], wp, bp);
+    for (uint32_t i = 0; i < kStreams; ++i) {
+      st[i].pos = i ? next_line(p + (end - p) * i / kStreams) : p;
+      st[i].stop = i + 1 < kStreams ? nullptr : end;
+    }
+    for (uint32_t i = 0; i + 1 < kStreams; ++i)
+      st[i].stop = st[i + 1].pos;
+    // Every line has at most kMaxLine bytes, so this many lines are in range.
+    for (size_t rounds = 1; rounds;) {
+      size_t room = SIZE_MAX;
+      for (const Stream &x : st)
+        room = std::min<size_t>(room, x.stop - x.pos);
+      for (rounds = room / kMaxLine; rounds--;)
+        for (Stream &x : st)
+          line(local, x, wp, bp);
+      rounds = room / kMaxLine;
+    }
+    for (Stream &x : st)
+      while (x.pos < x.stop)
+        line(local, x, wp, bp);
 
     std::lock_guard<std::mutex> lock(mu);
     int last = 0;
@@ -348,45 +421,40 @@ struct Job {
       pos[id] = total;
       total += count[id] + count[id + kIds];
     }
-    std::vector<uint32_t> lat = take(latbufs);
+    std::vector<int32_t> lat = take(latbufs);
     lat.reserve(1 << 17);
     lat.resize(total);
     for (const auto &[rec, n] : mine)
       for (uint32_t i = 0; i < n; ++i)
-        lat[pos[rec[i].tag % kIds]++] = rec[i].lat;
+        lat[pos[rec[i].tag % kIds]++] = rec[i].lat ^ 0x80000000;
 
+    static thread_local std::vector<int32_t> scratch;
     std::unique_ptr<char[]> text = take(outbufs);
     if (!text)
-      text.reset(new char[kPartCap]);
+      text.reset(new char[kPartCap + 256]);
     char *out = text.get(), label[22];
     std::snprintf(label, sizeof label, "%sT%02u:00:00Z ",
                   kDays[(hour + 18) / 24], (hour + 18) % 24);
-    auto put = [&](uint64_t v) {
-      *out++ = ' ';
-      out = std::to_chars(out, out + 20, v).ptr;
-    };
     for (const uint16_t id : order) {
       const uint32_t errors = count[id + kIds], n = count[id] + errors;
       if (!n)
         continue;
-      uint32_t *const a = lat.data() + pos[id] - n;
-      const uint32_t r50 = (50 * n + 99) / 100 - 1,
-                     r95 = (95 * n + 99) / 100 - 1,
-                     r99 = (99 * n + 99) / 100 - 1;
-      if (n <= 16)
-        std::sort(a, a + n);
-      else {
-        select(a, 0, n, r50);
-        select(a, r50 + 1, n, r95);
-        select(a, r95 + 1, n, r99);
-      }
+      int32_t *const a = lat.data() + pos[id] - n;
+      const uint32_t ranks[3] = {(50 * n + 99) / 100 - 1, (95 * n + 99) / 100 - 1,
+                                 (99 * n + 99) / 100 - 1};
+      int32_t value[3];
+      if (scratch.size() < n + 16)
+        scratch.resize(n + 16);
+      multiselect(a, scratch.data(), 0, n, ranks, 3, value);
       std::memcpy(out, label, 21);
-      std::memcpy(out + 21, names.img[id], names.len[id]);
+      for (uint32_t i = 0; i < 128; i += 32)
+        _mm256_storeu_si256((__m256i *)(out + 21 + i), load(names.img[id] + i));
       out += 21 + names.len[id];
-      for (const uint64_t v : {uint64_t{n}, uint64_t{a[r50]}, uint64_t{a[r95]},
-                               uint64_t{a[r99]}, uint64_t{errors}})
-        put(v);
-      put(errors ? uint64_t{errors} * 1000000 / n : 0);
+      for (const uint32_t v : {n, uint32_t(value[0]) ^ 0x80000000,
+                               uint32_t(value[1]) ^ 0x80000000,
+                               uint32_t(value[2]) ^ 0x80000000, errors})
+        out = put(out, v);
+      out = errors ? put(out, uint64_t{errors} * 1000000 / n) : put(out, 0);
       *out++ = '\n';
     }
     const size_t length = out - text.get();
