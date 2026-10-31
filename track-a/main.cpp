@@ -533,7 +533,8 @@ struct Job {
       }
       end[written + 1] = end[written] + part.second;
       sync_file_range(fd, end[written], part.second, SYNC_FILE_RANGE_WRITE);
-      if (written >= kKeep)
+      if (written >= kKeep &&
+          (((written + 1) & 3) == 0 || written + 1 == kHours))
         posix_fadvise(fd, 0, end[written - kKeep + 1], POSIX_FADV_DONTNEED);
       {
         std::lock_guard<std::mutex> pool_lock(mu);
