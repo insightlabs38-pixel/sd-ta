@@ -230,13 +230,12 @@ struct Job {
     { std::scoped_lock lock(mu, names.mu);
       mine.swap(runs[hour]);
       order = names.sorted; }
-    uint64_t count[kIds] = {};  // low 32 bits requests, high 32 bits 5xx
-    uint32_t pos[kIds], total = 0;
+    uint32_t count[2 * kIds] = {}, pos[kIds], total = 0;  // by tag: ids, then their 5xx
     for (const auto &[rec, n] : mine)
-      for (uint32_t i = 0; i < n; ++i) count[rec[i].tag % kIds] += 1 + (uint64_t{rec[i].tag} >> 11 << 32);
+      for (uint32_t i = 0; i < n; ++i) ++count[rec[i].tag];
     for (const uint16_t id : order) {
       pos[id] = total;
-      total += static_cast<uint32_t>(count[id]);
+      total += count[id] + count[id + kIds];
     }
     std::vector<uint32_t> lat = take(latbufs);
     lat.reserve(1 << 17);
@@ -250,7 +249,7 @@ struct Job {
     std::snprintf(label, sizeof label, "%sT%02u:00:00Z ", kDays[(hour + 18) / 24], (hour + 18) % 24);
     auto put = [&](uint64_t v) { *out++ = ' '; out = std::to_chars(out, out + 20, v).ptr; };
     for (const uint16_t id : order) {
-      const uint32_t n = static_cast<uint32_t>(count[id]), errors = static_cast<uint32_t>(count[id] >> 32);
+      const uint32_t errors = count[id + kIds], n = count[id] + errors;
       if (!n) continue;
       uint32_t *const a = lat.data() + pos[id] - n;
       const uint32_t r50 = (50 * n + 99) / 100 - 1, r95 = (95 * n + 99) / 100 - 1, r99 = (99 * n + 99) / 100 - 1;
