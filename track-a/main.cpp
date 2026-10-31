@@ -322,7 +322,7 @@ struct Job {
       total += count[id] + count[id + kIds];
     }
     std::vector<uint32_t> lat = take(latbufs);
-    lat.reserve(1 << 16);
+    lat.reserve(1 << 17);
     lat.resize(total);
     for (const auto &[rec, n] : mine)
       for (uint32_t i = 0; i < n; ++i)
@@ -347,8 +347,10 @@ struct Job {
                      r95 = (95 * n + 99) / 100 - 1,
                      r99 = (99 * n + 99) / 100 - 1;
       select(a, 0, n, r50);
-      select(a, r50 + 1, n, r95);
-      select(a, r95 + 1, n, r99);
+      if (n > 8) {
+        select(a, r50 + 1, n, r95);
+        select(a, r95 + 1, n, r99);
+      }
       std::memcpy(out, label, 21);
       std::memcpy(out + 21, names.img[id], names.len[id]);
       out += 21 + names.len[id];
