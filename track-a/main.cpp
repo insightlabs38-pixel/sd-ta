@@ -112,19 +112,16 @@ struct SpinLock {
   void unlock() { held.clear(std::memory_order_release); }
 };
 
-// Exact endpoint dictionary: 8-way buckets, lock-free hits, locked inserts
-// published by a release store of the tag (relies on x86 load ordering).
-// Keys are stored zero-padded after a space, so n + 1 equal bytes prove
-// equality.
+// Exact endpoint dictionary. The global part is an append-only log (key image,
+// length, fingerprint) behind a lock whose size is published with a release
+// store; entries below it never change. Each worker mirrors the log in a private
+// bucket table, so the hot lookups are plain SIMD reads without sharing. Keys
+// are stored after a space and zero-padded, so n + 1 equal bytes prove equality.
 struct Names {
-  struct alignas(64) Bucket {
-    uint32_t tag[8];
-    uint16_t id[8];
-  };
-  Bucket buckets[512]{};
   alignas(64) char img[kIds][128]{};
-  uint32_t len[kIds]{}, size = 0;
-  std::vector<uint16_t> sorted; // ids in byte order of their names
+  uint32_t len[kIds]{}, hash[kIds]{};
+  std::atomic<uint32_t> size{0};
+  std::vector<uint16_t> sorted; // ids in byte order of their names (under mu)
   SpinLock mu;
 
   bool same(uint32_t id, const char *ep, uint32_t n) const {
@@ -137,50 +134,80 @@ struct Names {
            (n < 64 ||
             (len[id] == n && !std::memcmp(img[id] + 64, ep + 64, n - 64)));
   }
-  // The id of the key, or -1 with b set to the bucket it belongs in.
-  int lookup(const char *ep, uint32_t n, uint32_t h, Bucket *&b) {
+};
+
+struct alignas(64) Bucket {
+  uint32_t tag[8];
+  uint16_t id[8];
+};
+struct Local { // one worker's view of the dictionary
+  Bucket buckets[512]{};
+  uint32_t synced = 0;
+
+  void put(uint32_t h, uint32_t id) {
+    Bucket *b = buckets + (h >> 16 & 511);
+    while (b->tag[7])
+      b = buckets + ((b - buckets + 1) & 511);
+    uint32_t slot = 0;
+    while (b->tag[slot])
+      ++slot;
+    b->id[slot] = id;
+    b->tag[slot] = h;
+  }
+  int lookup(const Names &names, const char *ep, uint32_t n, uint32_t h) const {
+    const __m256i want = _mm256_set1_epi32(h);
     for (uint32_t i = h >> 16;; ++i) {
-      b = buckets + (i & 511);
-      for (uint32_t lane = 0; lane < 8; ++lane) {
-        const uint32_t tag = __atomic_load_n(&b->tag[lane], __ATOMIC_ACQUIRE);
-        if (tag == h && same(b->id[lane], ep, n))
-          return b->id[lane];
-        if (!tag) return -1;
-      }
+      const Bucket *b = buckets + (i & 511);
+      uint32_t m = _mm256_movemask_ps(
+          _mm256_castsi256_ps(_mm256_cmpeq_epi32(load(b->tag), want)));
+      for (; m; m &= m - 1)
+        if (names.same(b->id[__builtin_ctz(m)], ep, n))
+          return b->id[__builtin_ctz(m)];
+      if (!b->tag[7])
+        return -1;
     }
   }
-  __attribute__((always_inline)) uint32_t find(const char *ep, uint32_t n) {
+  // Copies the log entries published since the last visit.
+  void sync(const Names &names) {
+    for (const uint32_t end = names.size.load(std::memory_order_acquire);
+         synced < end; ++synced)
+      put(names.hash[synced], synced);
+  }
+  uint32_t add(Names &names, const char *ep, uint32_t n, uint32_t h) {
+    sync(names);
+    if (const int id = lookup(names, ep, n, h); id >= 0)
+      return id;
+    std::lock_guard<SpinLock> lock(names.mu);
+    sync(names); // another worker may have published it meanwhile
+    if (const int id = lookup(names, ep, n, h); id >= 0)
+      return id;
+    const uint32_t id = names.size.load(std::memory_order_relaxed);
+    if (id >= kIds)
+      fail("too many endpoints");
+    std::memcpy(names.img[id], ep, n);
+    names.img[id][n] = ' ';
+    names.len[id] = n;
+    names.hash[id] = h;
+    names.sorted.insert(
+        std::lower_bound(names.sorted.begin(), names.sorted.end(), id,
+                         [&](uint32_t x, uint32_t y) {
+                           return std::memcmp(names.img[x], names.img[y], 128) <
+                                  0;
+                         }),
+        id);
+    names.size.store(id + 1, std::memory_order_release);
+    put(h, id);
+    synced = id + 1;
+    return id;
+  }
+  __attribute__((always_inline)) uint32_t find(Names &names, const char *ep,
+                                               uint32_t n) {
     const uint64_t keep = n < 8 ? n * 8 : 64;
     const uint64_t x = _bzhi_u64(load64(ep), keep),
                    y = _bzhi_u64(load64(ep + std::max(n, 8u) - 8), keep);
     const uint32_t h = _mm_crc32_u64(_mm_crc32_u64(n, x), y) | 1;
-    Bucket *b;
-    const int id = lookup(ep, n, h, b);
-    return id >= 0 ? id : add(ep, n, h);
-  }
-  uint32_t add(const char *ep, uint32_t n, uint32_t h) {
-    std::lock_guard<SpinLock> lock(mu);
-    Bucket *b;
-    if (const int found = lookup(ep, n, h, b); found >= 0)
-      return found;
-    const uint32_t id = size++;
-    uint32_t slot = 0;
-    while (__atomic_load_n(&b->tag[slot], __ATOMIC_RELAXED))
-      ++slot;
-    if (id >= kIds)
-      fail("too many endpoints");
-    std::memcpy(img[id], ep, n);
-    img[id][n] = ' ';
-    len[id] = n;
-    sorted.insert(std::lower_bound(sorted.begin(), sorted.end(), id,
-                                   [&](uint32_t x, uint32_t y) {
-                                     return std::memcmp(img[x], img[y], 128) <
-                                            0;
-                                   }),
-                  id);
-    b->id[slot] = id;
-    __atomic_store_n(&b->tag[slot], h, __ATOMIC_RELEASE);
-    return id;
+    const int id = lookup(names, ep, n, h);
+    return id >= 0 ? id : add(names, ep, n, h);
   }
 };
 
@@ -234,14 +261,14 @@ struct Job {
 
   // Parses one line and returns the next; 256 readable bytes must follow p.
   __attribute__((always_inline)) const char *
-  line(const char *p, Rec *(&wp)[kHours], Rec *(&bp)[kHours]) {
+  line(Local &local, const char *p, Rec *(&wp)[kHours], Rec *(&bp)[kHours]) {
     const uint32_t hour = (p[9] + (p[6] & 1)) * 24 + p[11] * 10 + p[12] - 1698;
     const char *q = p + 28;
     uint64_t m = spaces(q) | uint64_t{spaces(q + 32)} << 32;
     const uint32_t k1 = __builtin_ctzll(m);
     m &= m - 1;
     const uint32_t k2 = m ? __builtin_ctzll(m) : far_space(q);
-    const uint32_t id = names.find(q + k1 + 1, k2 - k1 - 1);
+    const uint32_t id = local.find(names, q + k1 + 1, k2 - k1 - 1);
     const char *s = q + k2 + 1;
     const uint32_t error = *s == '5';
     s += 4;
@@ -266,7 +293,7 @@ struct Job {
     return s + 1;
   }
 
-  void parse(uint32_t block) {
+  void parse(Local &local, uint32_t block) {
     Rec *wp[kHours]{}, *bp[kHours]{};
     const char *pos[kStreams],
         *stop[kStreams]; // interleaved streams overlap their latencies
@@ -280,10 +307,10 @@ struct Job {
     };
     while (live())
       for (uint32_t i = 0; i < kStreams; ++i)
-        pos[i] = line(pos[i], wp, bp);
+        pos[i] = line(local, pos[i], wp, bp);
     for (uint32_t i = 0; i < kStreams; ++i)
       while (pos[i] < stop[i])
-        pos[i] = line(pos[i], wp, bp);
+        pos[i] = line(local, pos[i], wp, bp);
 
     std::lock_guard<std::mutex> lock(mu);
     int last = 0;
@@ -411,6 +438,7 @@ struct Job {
   // Finalizes hours once they are safe and otherwise parses blocks, but never
   // more than kAhead blocks past the oldest unfinished one.
   void work(uint32_t index) {
+    const auto local = std::make_unique<Local>();
     std::unique_lock<std::mutex> lock(mu);
     for (;;) {
       if (claimable()) {
@@ -422,7 +450,7 @@ struct Job {
       } else if (next_block < nblocks && next_block < watermark + kAhead) {
         const uint32_t block = next_block++;
         lock.unlock();
-        parse(block);
+        parse(*local, block);
         lock.lock();
       } else if (next_hour >= kHours) {
         lock.unlock(); // drop this thread's share of the file mapping so that
