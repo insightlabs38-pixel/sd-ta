@@ -159,43 +159,5 @@ jobs:
             done
             echo "$label max5=$peak" | tee -a /tmp/summary.txt
           done
-      - name: Thread-count tournament on full seed-1
-        shell: bash
-        run: |
-          set -euo pipefail
-          python - <<'PY' | tee -a /tmp/summary.txt
-          import hashlib, os, random, statistics, subprocess, time
-          configs = [4, 6, 8, 12]
-          env = dict(os.environ, SD_DATA_DIR='/tmp/a-full', SD_OUT_DIR='/tmp/a-out')
-          samples = {n: [] for n in configs}
-          rng = random.Random(20261031)
-          expected = '495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3'
-          for _ in range(31):
-              order = configs[:]
-              rng.shuffle(order)
-              for n in order:
-                  env['SD_THREADS'] = str(n)
-                  start = time.perf_counter()
-                  subprocess.run(['./solution'], env=env, check=True)
-                  samples[n].append(time.perf_counter() - start)
-                  with open('/tmp/a-out/summary.txt', 'rb') as f:
-                      assert hashlib.sha256(f.read()).hexdigest() == expected
-          for n in configs:
-              xs = samples[n]
-              print(f'Threads={n} median={statistics.median(xs):.6f}s min={min(xs):.6f}s max={max(xs):.6f}s', flush=True)
-          PY
-          for threads in 4 6 8 12; do
-            peak=0
-            for trial in 1 2 3; do
-              current=$(docker run --rm --network=none --read-only --memory=8g --memory-swap=8g --pids-limit=512 --tmpfs /tmp:rw,size=1g \
-                --env SD_THREADS="$threads" \
-                --mount type=bind,source=/tmp/a-full,target=/data,readonly \
-                --mount type=bind,source=/tmp/a-container-out,target=/out \
-                --entrypoint /bin/sh sd-track-a -c '/solution && cat /sys/fs/cgroup/memory.peak')
-              echo "threads=$threads trial=$trial memory.peak=$current" | tee -a /tmp/summary.txt
-              if (( current > peak )); then peak=$current; fi
-            done
-            echo "threads=$threads max3=$peak" | tee -a /tmp/summary.txt
-          done
       - name: Summary
         run: cat /tmp/summary.txt
