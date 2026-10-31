@@ -89,7 +89,7 @@ struct Worker {
 
   void parse(const char *p, const char *end) {
     names.reserve(kEndpoints);
-    records.reserve(static_cast<size_t>(end - p) / 70 + 128);
+    records.reserve(static_cast<size_t>(end - p) / 73 + 128);
     while (p < end) {
       const char *const line = p;
       const uint32_t hour = hour_index(p);
