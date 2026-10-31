@@ -266,7 +266,7 @@ struct Job {
           r ? r : static_cast<Rec *>(std::malloc(kRunCap * sizeof(Rec) + sizeof(uint64_t)));
     }
     const uint64_t rec = lat | uint64_t{id | error << 11} << 32;
-    std::memcpy(w++, &rec, 8); // the next record overwrites the 2 spare bytes
+    std::memcpy(w++, &rec, sizeof(Rec));
     return s + 1;
   }
 
