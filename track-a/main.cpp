@@ -29,7 +29,7 @@ const char *const kDays[] = {"2026-10-30", "2026-10-31", "2026-11-01",
 struct __attribute__((packed)) Rec {
   uint32_t lat;
   uint16_t tag;
-}; // tag: id | 5xx << 11
+}; // tag: id | 5xx << 11 | exact logarithmic bucket << 12
 using Run = std::pair<Rec *, uint32_t>;
 // A completed hour waits as exact numeric results, not expanded output text.
 struct Result {
@@ -69,124 +69,29 @@ uint64_t digits8(uint64_t v) {
   return (r & 0xffffffff) * 10000 + (r >> 32);
 }
 
-// Lane permutations that compress the lanes of an 8-bit mask to the bottom
-// (kLow) or, for the lanes outside the mask, to the top (kHigh) of a vector.
-struct Lanes {
-  uint8_t low[256][8]{}, high[256][8]{};
-  constexpr Lanes() {
-    for (int m = 0; m < 256; ++m)
-      for (int lane = 0, in = 0, out = 0; lane < 8; ++lane)
-        if (m >> lane & 1)
-          low[m][in++] = lane;
-        else
-          high[m][__builtin_popcount(m) + out++] = lane;
-  }
-};
-constexpr Lanes kLanes;
-
-// Copies src[lo, hi) to dst so that the values below pivot come first; returns
-// how many there are. Values are int32 (latencies with the sign bit flipped).
-uint32_t split(const int32_t *src, int32_t *dst, uint32_t lo, uint32_t hi,
-               int32_t pivot) {
-  const __m256i bound = _mm256_set1_epi32(pivot);
-  uint32_t i = lo, l = lo, r = hi;
-  for (; hi - i >= 16; i += 8) {
-    const __m256i v = load(src + i);
-    const uint32_t m = _mm256_movemask_ps(
-        _mm256_castsi256_ps(_mm256_cmpgt_epi32(bound, v)));
-    auto lanes = [&](const uint8_t *idx) {
-      return _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i *)idx));
-    };
-    _mm256_storeu_si256((__m256i *)(dst + l),
-                        _mm256_permutevar8x32_epi32(v, lanes(kLanes.low[m])));
-    _mm256_storeu_si256((__m256i *)(dst + r - 8),
-                        _mm256_permutevar8x32_epi32(v, lanes(kLanes.high[m])));
-    l += __builtin_popcount(m);
-    r -= 8 - __builtin_popcount(m);
-  }
-  for (; i < hi; ++i) {
-    const int32_t v = src[i];
-    dst[l] = dst[r - 1] = v;
-    l += v < pivot;
-    r -= v >= pivot;
-  }
-  return l - lo;
+// Exact logarithmic buckets are already ordered by value. Within each bucket,
+// nth_element resolves only ranks that land there, reusing earlier partitions.
+uint32_t bucket(uint32_t latency) {
+  return (31 - __builtin_clz(latency | 1u)) / 2;
 }
-
-// Sorts the first n <= 16 values of a (plus 16 readable slots) into out[0, 16)
-// with a bitonic network on two vectors; unused lanes sort to the end.
-template <int M> __m256i step(__m256i v, __m256i other) {
-  return _mm256_blend_epi32(_mm256_min_epi32(v, other),
-                            _mm256_max_epi32(v, other), M);
-}
-__m256i sort8(__m256i v) {
-  const __m256i flip = _mm256_setr_epi32(7, 6, 5, 4, 3, 2, 1, 0);
-  v = step<0xAA>(v, _mm256_shuffle_epi32(v, 0xB1));
-  v = step<0xCC>(v, _mm256_shuffle_epi32(v, 0x1B));
-  v = step<0xAA>(v, _mm256_shuffle_epi32(v, 0xB1));
-  v = step<0xF0>(v, _mm256_permutevar8x32_epi32(v, flip));
-  v = step<0xCC>(v, _mm256_shuffle_epi32(v, 0x4E));
-  return step<0xAA>(v, _mm256_shuffle_epi32(v, 0xB1));
-}
-__m256i merge8(__m256i v) { // v is a bitonic sequence
-  v = step<0xF0>(v, _mm256_permute2x128_si256(v, v, 1));
-  v = step<0xCC>(v, _mm256_shuffle_epi32(v, 0x4E));
-  return step<0xAA>(v, _mm256_shuffle_epi32(v, 0xB1));
-}
-void sort16(const int32_t *a, uint32_t n, int32_t *out) {
-  const __m256i iota = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7),
-                big = _mm256_set1_epi32(INT32_MAX), count = _mm256_set1_epi32(n);
-  __m256i x = _mm256_blendv_epi8(big, load(a), _mm256_cmpgt_epi32(count, iota)),
-          y = _mm256_blendv_epi8(
-              big, load(a + 8),
-              _mm256_cmpgt_epi32(count, _mm256_add_epi32(iota, _mm256_set1_epi32(8))));
-  x = sort8(x);
-  y = _mm256_permutevar8x32_epi32(sort8(y), _mm256_setr_epi32(7, 6, 5, 4, 3, 2, 1, 0));
-  _mm256_storeu_si256((__m256i *)out, merge8(_mm256_min_epi32(x, y)));
-  _mm256_storeu_si256((__m256i *)(out + 8), merge8(_mm256_max_epi32(x, y)));
-}
-
-// Stores the values at the sorted positions k[0..nk) of a[lo, hi) into out;
-// the positions are ascending and inside the range. a and b swap roles at each
-// level (b is scratch of the same size).
-void multiselect(int32_t *a, int32_t *b, uint32_t lo, uint32_t hi,
-                 const uint32_t *k, int nk, int32_t *out, int depth = 0) {
-  if (hi - lo <= 16) {
-    alignas(32) int32_t sorted[16];
-    sort16(a + lo, hi - lo, sorted);
-    for (int i = 0; i < nk; ++i)
-      out[i] = sorted[k[i] - lo];
-    return;
-  }
-  if (depth > 40) {
-    std::sort(a + lo, a + hi);
-    for (int i = 0; i < nk; ++i)
-      out[i] = a[k[i]];
-    return;
-  }
-  const int32_t x = a[lo], y = a[lo + (hi - lo) / 2], z = a[hi - 1];
-  int32_t pivot = std::max(std::min(x, y), std::min(std::max(x, y), z));
-  uint32_t cut = lo + split(a, b, lo, hi, pivot);
-  if (cut == lo) { // pivot is the minimum: peel off its duplicates
-    if (pivot == INT32_MAX) {
-      std::fill(out, out + nk, pivot);
-      return;
+void quantiles(int32_t *lat, uint32_t lo, const uint32_t *end,
+               uint32_t n, int32_t *value) {
+  const uint32_t ranks[3] = {(50 * n + 99) / 100 - 1,
+                             (95 * n + 99) / 100 - 1,
+                             (99 * n + 99) / 100 - 1};
+  uint32_t bin = 0, lower = lo;
+  for (uint32_t p = 0; p < 3; ++p) {
+    const uint32_t rank = lo + ranks[p];
+    if (p && ranks[p] == ranks[p - 1]) {
+      value[p] = value[p - 1];
+      continue;
     }
-    cut = lo + split(a, b, lo, hi, pivot + 1);
-    for (int i = 0; i < nk && k[i] < cut; ++i)
-      out[i] = pivot;
-    if (cut == hi)
-      return;
-    int done = std::lower_bound(k, k + nk, cut) - k;
-    if (done < nk)
-      multiselect(b, a, cut, hi, k + done, nk - done, out + done, depth + 1);
-    return;
+    while (end[bin] <= rank) ++bin;
+    const uint32_t first = std::max(lower, bin ? end[bin - 1] : lo);
+    std::nth_element(lat + first, lat + rank, lat + end[bin]);
+    value[p] = lat[rank];
+    lower = rank + 1;
   }
-  const int left = std::lower_bound(k, k + nk, cut) - k;
-  if (left)
-    multiselect(b, a, lo, cut, k, left, out, depth + 1);
-  if (left < nk)
-    multiselect(b, a, cut, hi, k + left, nk - left, out + left, depth + 1);
 }
 
 // Dictionary inserts are tiny and bursty at startup, so waiters spin instead of
@@ -377,7 +282,7 @@ struct Job {
       for (lat = digits8(v), s += 8; *s != '\n'; ++s)
         lat = lat * 10 + (*s - '0');
     }
-    const uint64_t rec = lat | uint64_t{id | error << 11} << 32;
+    const uint64_t rec = lat | uint64_t{id | error << 11 | bucket(lat) << 12} << 32;
     std::memcpy((*st.at)++, &rec, sizeof(Rec));
     st.pos = s + 1;
   }
@@ -435,25 +340,26 @@ struct Job {
       std::lock_guard<SpinLock> names_lock(names.mu);
       order = names.sorted;
     }
-    uint32_t count[2 * kIds] = {}, pos[kIds],
-                       total = 0; // by tag: ids, then their 5xx
+    uint32_t cursor[kIds * 16]{}, errors[kIds]{}, total = 0;
     for (const auto &[rec, n] : mine)
-      for (uint32_t i = 0; i < n; ++i)
-        ++count[rec[i].tag];
-    uint16_t live[kIds]; // the endpoints seen in this hour, in output order
-    uint32_t seen = 0;
-    for (const uint16_t id : order) {
-      const uint32_t n = count[id] + count[id + kIds];
-      pos[id] = total;
-      total += n;
-      live[seen] = id;
-      seen += n != 0;
-    }
+      for (uint32_t i = 0; i < n; ++i) {
+        const uint32_t id = rec[i].tag % kIds;
+        ++cursor[id * 16 + (rec[i].tag >> 12)];
+        errors[id] += bool(rec[i].tag & kIds);
+      }
+    for (const uint16_t id : order)
+      for (uint32_t bin = 0; bin < 16; ++bin) {
+        uint32_t &at = cursor[id * 16 + bin];
+        const uint32_t n = at;
+        at = total;
+        total += n;
+      }
     std::vector<int32_t> lat = take(latbufs);
     lat.resize(total + 16);
     for (const auto &[rec, n] : mine)
       for (uint32_t i = 0; i < n; ++i)
-        lat[pos[rec[i].tag % kIds]++] = rec[i].lat ^ 0x80000000;
+        lat[cursor[(rec[i].tag % kIds) * 16 + (rec[i].tag >> 12)]++] =
+            rec[i].lat ^ 0x80000000;
 
     // Scatter consumes the runs. Recycle them before percentile selection and
     // formatting so that parsing need not allocate another generation.
@@ -462,23 +368,19 @@ struct Job {
       for (const auto &[rec, n] : mine)
         runbufs.push_back(rec);
     }
-    static thread_local std::vector<int32_t> scratch;
     auto result = take(resultbufs);
     if (!result)
       result = std::make_unique<Result[]>(kIds);
-    for (uint32_t i = 0; i < seen; ++i) {
-      const uint16_t id = live[i];
-      const uint32_t errors = count[id + kIds], n = count[id] + errors;
-      int32_t *const a = lat.data() + pos[id] - n;
-      const uint32_t ranks[3] = {(50 * n + 99) / 100 - 1, (95 * n + 99) / 100 - 1,
-                                 (99 * n + 99) / 100 - 1};
+    uint32_t lo = 0, seen = 0;
+    for (const uint16_t id : order) {
+      const uint32_t n = cursor[id * 16 + 15] - lo;
+      if (!n) continue;
       int32_t value[3];
-      if (scratch.size() < n + 16)
-        scratch.resize(n + 16);
-      multiselect(a, scratch.data(), 0, n, ranks, 3, value);
-      result[i] = {n, uint32_t(value[0]) ^ 0x80000000,
+      quantiles(lat.data(), lo, cursor + id * 16, n, value);
+      lo += n;
+      result[seen++] = {n, uint32_t(value[0]) ^ 0x80000000,
                    uint32_t(value[1]) ^ 0x80000000,
-                   uint32_t(value[2]) ^ 0x80000000, errors, id};
+                   uint32_t(value[2]) ^ 0x80000000, errors[id], id};
     }
     {
       std::lock_guard<std::mutex> lock(mu);
