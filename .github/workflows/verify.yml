@@ -1,7 +1,7 @@
 name: Track A exactness
 on:
   push:
-    branches: [main, 'research/a-breakthrough-20261101-hash-filter']
+    branches: [main, 'research/a-breakthrough-20261101-hash-8k']
   workflow_dispatch:
 jobs:
   verify:
