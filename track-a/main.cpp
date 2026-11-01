@@ -20,7 +20,7 @@
 #include <vector>
 
 namespace {
-constexpr uint32_t kHours = 72, kIds = 2048, kBlock = 256 << 10, kStreams = 2;
+constexpr uint32_t kHours = 72, kIds = 2048, kBlock = 256 << 10, kStreams = 4;
 constexpr uint32_t kLag = 2, kNever = 1000, kKeep = 2;
 constexpr uint32_t kMaxLine = 178, kRunCap = kBlock / 40 + 16, kPartCap = kIds * 256;
 const char *const kDays[] = {"2026-10-30", "2026-10-31", "2026-11-01",
@@ -532,6 +532,8 @@ struct Job {
         done += w;
       }
       end[written + 1] = end[written] + part.second;
+      if (written + 1 == kHours && ftruncate(fd, end[kHours]))
+        fail("size summary");
       sync_file_range(fd, end[written], part.second, SYNC_FILE_RANGE_WRITE);
       if (written >= kKeep)
         posix_fadvise(fd, 0, end[written - kKeep + 1], POSIX_FADV_DONTNEED);
@@ -579,13 +581,23 @@ struct Job {
       }
     }
   }
+  std::thread pool[16]; // worker i is started by worker (i - 1) / 2
+  std::atomic<uint32_t> started{1};
+  // Workers start their children before working, so that a dozen threads are up
+  // after a few thread creations instead of eleven.
+  void start(uint32_t i) {
+    for (uint32_t c = 2 * i + 1; c <= 2 * i + 2 && c < threads; ++c) {
+      pool[c] = std::thread([this, c] { start(c); });
+      started.fetch_add(1, std::memory_order_release);
+    }
+    work(i);
+  }
   bool run() {
-    std::vector<std::thread> pool;
+    start(0);
+    while (started.load(std::memory_order_acquire) < threads)
+      std::this_thread::yield();
     for (uint32_t i = 1; i < threads; ++i)
-      pool.emplace_back([this, i] { work(i); });
-    work(0);
-    for (auto &t : pool)
-      t.join();
+      pool[i].join();
     return !bad;
   }
 };
@@ -608,7 +620,7 @@ int main() {
     fail("map requests");
   const int fd =
       open((std::string(out ? out : "/out") + "/summary.txt").c_str(),
-           O_WRONLY | O_CREAT | O_TRUNC, 0644);
+           O_WRONLY | O_CREAT, 0644); // an old file is overwritten in place
   if (fd < 0)
     fail("open summary");
   cpu_set_t cpus{};
