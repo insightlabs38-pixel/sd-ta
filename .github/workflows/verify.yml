@@ -1,7 +1,7 @@
 name: Track A exactness
 on:
   push:
-    branches: [main, 'research/a-breakthrough-20261101-word4-sidecar']
+    branches: [main, 'research/a-breakthrough-20261101-word4-sidecar', 'a/word4-official-build']
   workflow_dispatch:
 jobs:
   verify:
@@ -164,6 +164,36 @@ jobs:
             done
             echo "$label max5=$peak" | tee -a /tmp/summary.txt
           done
+      - name: Paired official-linking cgroup memory versus current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin main
+          mkdir -p /tmp/a-current-main-image
+          git show FETCH_HEAD:track-a/main.cpp > /tmp/a-current-main-image/main.cpp
+          cp track-a/Dockerfile /tmp/a-current-main-image/Dockerfile
+          docker build --network=none --pull=false -t sd-track-a-current-main -f /tmp/a-current-main-image/Dockerfile /tmp/a-current-main-image
+          python - <<'PY'
+          import random, statistics, subprocess
+          images={'main':'sd-track-a-current-main','candidate':'sd-track-a'}
+          peaks={key:[] for key in images}
+          for trial in range(10):
+              order=list(images)
+              random.Random(20261101+trial).shuffle(order)
+              for key in order:
+                  command=['docker','run','--rm','--network=none','--read-only',
+                           '--memory=8g','--memory-swap=8g','--pids-limit=512',
+                           '--tmpfs','/tmp:rw,size=1g',
+                           '--mount','type=bind,source=/tmp/a-full,target=/data,readonly',
+                           '--mount','type=bind,source=/tmp/a-container-out,target=/out',
+                           '--entrypoint','/bin/sh',images[key],
+                           '-c','/solution && cat /sys/fs/cgroup/memory.peak']
+                  value=int(subprocess.check_output(command,text=True).strip())
+                  peaks[key].append(value)
+                  print(f'OFFICIAL_LINK_M trial={trial+1} label={key} bytes={value}',flush=True)
+          a,b=statistics.median(peaks[k]) for k in ('main','candidate')
+          print(f'OFFICIAL_LINK_M_MEDIAN main={a:.0f} candidate={b:.0f} ratio={b/a:.5f}',flush=True)
+          PY
       - name: Summary
         run: cat /tmp/summary.txt
 
