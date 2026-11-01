@@ -403,12 +403,25 @@ struct Job {
     _mm_prefetch(p + 1280, _MM_HINT_T0);
     _mm_prefetch(p + 1344, _MM_HINT_T0);
     const char *q = p + 28;
-    uint64_t m = spaces(q) | uint64_t{spaces(q + 32)} << 32;
-    const uint32_t k1 = __builtin_ctzll(m);
-    m &= m - 1;
-    const uint32_t k2 = m ? __builtin_ctzll(m) : far_space(q);
-    const uint32_t id = local.find(names, q + k1 + 1, k2 - k1 - 1);
-    const char *s = q + k2 + 1;
+    // Seven fixed method spellings: classify method length without looking for
+    // its delimiter. Scan only the endpoint's space terminator.
+    uint32_t method_len = 3;
+    if (q[0] == 'P')
+      method_len = q[1] == 'U' ? 3 : q[1] == 'O' ? 4 : 5;
+    else if (q[0] == 'O')
+      method_len = 7;
+    else if (q[0] == 'D')
+      method_len = 6;
+    else if (q[0] == 'H')
+      method_len = 4;
+    const char *ep = q + method_len + 1;
+    const char *sep = ep;
+    uint32_t mask;
+    while (!(mask = spaces(sep)))
+      sep += 32;
+    sep += __builtin_ctz(mask);
+    const uint32_t id = local.find(names, ep, uint32_t(sep - ep));
+    const char *s = sep + 1;
     const uint32_t error = *s == '5';
     s += 4;
     uint64_t v = load64(s) ^ 0x3030303030303030, lat;
