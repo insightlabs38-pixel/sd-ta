@@ -164,3 +164,26 @@ jobs:
           done
       - name: Summary
         run: cat /tmp/summary.txt
+
+      - name: Research thread-count matched 9-run comparisons
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib,os,random,statistics,subprocess,time
+          hash_expected='495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3'
+          for threads in (1,2,4,8,12):
+              env=dict(os.environ,SD_THREADS=str(threads),SD_DATA_DIR='/tmp/a-full',SD_OUT_DIR='/tmp/a-out')
+              samples={'champion':[],'L0':[]}
+              for k in range(9):
+                  order=list(samples)
+                  random.Random(20261101+threads*13+k).shuffle(order)
+                  for name in order:
+                      t=time.perf_counter()
+                      subprocess.run(['/tmp/a-prev-v3' if name=='champion' else './solution'],env=env,check=True)
+                      samples[name].append(time.perf_counter()-t)
+                      with open('/tmp/a-out/summary.txt','rb') as f:
+                          assert hashlib.sha256(f.read()).hexdigest()==hash_expected
+              a,b=statistics.median(samples['champion']),statistics.median(samples['L0'])
+              print(f'THREADS={threads} control={a:.6f}s L0={b:.6f}s ratio={b/a:.4f}',flush=True)
+          PY
