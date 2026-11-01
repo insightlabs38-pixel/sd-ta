@@ -226,12 +226,30 @@ struct Local { // one worker's private open-addressing view of the dictionary
   static constexpr uint32_t kSlots = 1 << 14;
   uint16_t slot[kSlots]{}; // id + 1, or 0 when free
   uint32_t synced = 0;
+  // Dynamic exact prefix dispatch, usable before the endpoint catalogue fills.
+  static constexpr uint32_t kFastSlots = 1 << 14;
+  uint16_t prefix[kFastSlots]{};
+  int prefix_find(const Names &names, const char *ep) const {
+    const uint64_t first = load64(ep);
+    const uint16_t v = prefix[_mm_crc32_u64(0, first) & (kFastSlots - 1)];
+    if (!v || v == 0xffff) return -1;
+    const uint32_t id = v - 1, n = names.len[id];
+    return load64(names.img[id]) == first && ep[n] == ' ' &&
+                   names.same(id, ep, n)
+               ? int(id) : -1;
+  }
 
-  void put(uint32_t h, uint32_t id) {
+  void put(const Names &names, uint32_t h, uint32_t id) {
     uint32_t i = h >> 18;
     while (slot[i])
       i = (i + 1) % kSlots;
     slot[i] = id + 1;
+    if (names.len[id] >= 8) {
+      const uint32_t ix = _mm_crc32_u64(0, load64(names.img[id])) & (kFastSlots - 1);
+      uint16_t &v = prefix[ix];
+      if (!v) v = id + 1;
+      else if (v != id + 1) v = 0xffff;
+    }
   }
   int lookup(const Names &names, const char *ep, uint32_t n, uint32_t h) const {
     for (uint32_t i = h >> 18; slot[i]; i = (i + 1) % kSlots)
@@ -243,7 +261,7 @@ struct Local { // one worker's private open-addressing view of the dictionary
   void sync(const Names &names) {
     for (const uint32_t end = names.size.load(std::memory_order_acquire);
          synced < end; ++synced)
-      put(names.hash[synced], synced);
+      put(names, names.hash[synced], synced);
   }
   uint32_t add(Names &names, const char *ep, uint32_t n, uint32_t h) {
     sync(names);
@@ -268,7 +286,7 @@ struct Local { // one worker's private open-addressing view of the dictionary
                          }),
         id);
     names.size.store(id + 1, std::memory_order_release);
-    put(h, id);
+    put(names, h, id);
     synced = id + 1;
     return id;
   }
@@ -378,12 +396,21 @@ struct Job {
     _mm_prefetch(p + 1280, _MM_HINT_T0);
     _mm_prefetch(p + 1344, _MM_HINT_T0);
     const char *q = p + 28;
-    uint64_t m = spaces(q) | uint64_t{spaces(q + 32)} << 32;
-    const uint32_t k1 = __builtin_ctzll(m);
-    m &= m - 1;
-    const uint32_t k2 = m ? __builtin_ctzll(m) : far_space(q);
-    const uint32_t id = local.find(names, q + k1 + 1, k2 - k1 - 1);
-    const char *s = q + k2 + 1;
+    const uint32_t k1 = __builtin_ctz(spaces(q));
+    const char *ep = q + k1 + 1;
+    const int fast_id = local.prefix_find(names, ep);
+    uint32_t id;
+    const char *s;
+    if (__builtin_expect(fast_id >= 0, 1)) {
+      id = fast_id;
+      s = ep + names.len[id] + 1;
+    } else {
+      uint64_t m = spaces(q) | uint64_t{spaces(q + 32)} << 32;
+      m &= m - 1;
+      const uint32_t k2 = m ? __builtin_ctzll(m) : far_space(q);
+      id = local.find(names, ep, k2 - k1 - 1);
+      s = q + k2 + 1;
+    }
     const uint32_t error = *s == '5';
     s += 4;
     uint64_t v = load64(s) ^ 0x3030303030303030, lat;
