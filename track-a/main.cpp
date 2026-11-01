@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <charconv>
+#include <cstddef>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -28,9 +29,14 @@ const char *const kDays[] = {"2026-10-30", "2026-10-31", "2026-11-01",
 
 struct __attribute__((packed)) Rec {
   uint32_t lat;
-  uint16_t tag;
-}; // tag: id | 5xx << 11
-using Run = std::pair<Rec *, uint32_t>;
+  uint16_t next; // one-based index in this chunk; zero ends a chain
+};
+struct Chunk {
+  uint16_t head[kIds], count[kIds], errors[kIds];
+  uint32_t used;
+  Rec rec[kRunCap];
+};
+using Run = Chunk *;
 using Part =
     std::pair<std::unique_ptr<char[]>, size_t>; // output text, its length
 
@@ -287,7 +293,7 @@ struct Local { // one worker's private open-addressing view of the dictionary
 struct Stream {
   const char *pos, *stop;
   uint64_t date = 0; // bytes 5..12 of the previous line
-  Rec **at = nullptr;
+  Chunk **at = nullptr;
 };
 
 // The eight decimal digits of v < 10^8 as bytes 0..9, most significant first.
@@ -328,15 +334,14 @@ struct Job {
   uint32_t written = 0;    // hours written so far
   bool writing = false;
   std::atomic<size_t> zapped{0}; // 4 MiB steps of the mapping released
-  std::vector<Rec *> runbufs; // free buffers, guarded by mu
-  std::vector<std::vector<int32_t>> latbufs;
+  std::vector<Chunk *> runbufs; // free buffers, guarded by mu
   std::vector<std::unique_ptr<char[]>> outbufs;
 
   Job(const char *b, size_t n, uint32_t l, int f, uint32_t t)
       : base(b), size(n), lag(l), nblocks((n + kBlock - 1) / kBlock),
         threads(t), fd(f), top(nblocks, -1) {}
   ~Job() {
-    for (Rec *r : runbufs)
+    for (Chunk *r : runbufs)
       std::free(r);
   }
 
@@ -361,18 +366,17 @@ struct Job {
 
   // Parses one line of the stream; 256 readable bytes must follow it.
   __attribute__((always_inline)) void line(Local &local, Stream &st,
-                                           Rec *(&wp)[kHours],
-                                           Rec *(&bp)[kHours]) {
+                                           Chunk *(&wp)[kHours]) {
     const char *p = st.pos;
     if (const uint64_t date = load64(p + 5); date != st.date) {
       st.date = date;
       st.at = wp + (p[9] + (p[6] & 1)) * 24 + p[11] * 10 + p[12] - 1698;
       if (!*st.at) {
-        Rec *r = take(runbufs);
-        *st.at = bp[st.at - wp] =
-            r ? r
-              : static_cast<Rec *>(
-                    std::malloc(kRunCap * sizeof(Rec) + sizeof(uint64_t)));
+        Chunk *r = take(runbufs);
+        if (!r)
+          r = static_cast<Chunk *>(std::malloc(sizeof(Chunk)));
+        std::memset(r, 0, offsetof(Chunk, rec));
+        *st.at = r;
       }
     }
     _mm_prefetch(p + 1280, _MM_HINT_T0);
@@ -396,13 +400,17 @@ struct Job {
       for (lat = digits8(v), s += 8; *s != '\n'; ++s)
         lat = lat * 10 + (*s - '0');
     }
-    const uint64_t rec = lat | uint64_t{id | error << 11} << 32;
-    std::memcpy((*st.at)++, &rec, sizeof(Rec));
+    Chunk &chunk = **st.at;
+    const uint32_t at = chunk.used++;
+    chunk.rec[at] = {uint32_t(lat), chunk.head[id]};
+    chunk.head[id] = at + 1;
+    ++chunk.count[id];
+    chunk.errors[id] += error;
     st.pos = s + 1;
   }
 
   void parse(Local &local, uint32_t block) {
-    Rec *wp[kHours]{}, *bp[kHours]{};
+    Chunk *wp[kHours]{};
     Stream st[kStreams]; // interleaved streams overlap their latencies
     const char *p = align(block), *end = align(block + 1);
     for (uint32_t i = 0; i < kStreams; ++i) {
@@ -419,25 +427,25 @@ struct Job {
       for (rounds = room / kMaxLine; rounds--;) {
 #pragma GCC unroll 4
         for (Stream &x : st)
-          line(local, x, wp, bp);
+          line(local, x, wp);
       }
       rounds = room / kMaxLine;
     }
     for (Stream &x : st)
       while (x.pos < x.stop)
-        line(local, x, wp, bp);
+        line(local, x, wp);
 
     std::lock_guard<std::mutex> lock(mu);
     int last = 0;
     for (uint32_t h = 0; h < kHours; ++h) {
-      if (!bp[h])
+      if (!wp[h])
         continue;
       last = h;
       if (h < next_hour) {
         bad = true;
-        runbufs.push_back(bp[h]);
+        runbufs.push_back(wp[h]);
       } else
-        runs[h].push_back({bp[h], static_cast<uint32_t>(wp[h] - bp[h])});
+        runs[h].push_back(wp[h]);
     }
     top[block] = last;
     for (++registered; watermark < nblocks && top[watermark] >= 0; ++watermark)
@@ -454,27 +462,9 @@ struct Job {
       std::lock_guard<SpinLock> names_lock(names.mu);
       order = names.sorted;
     }
-    uint32_t count[2 * kIds] = {}, pos[kIds],
-                       total = 0; // by tag: ids, then their 5xx
-    for (const auto &[rec, n] : mine)
-      for (uint32_t i = 0; i < n; ++i)
-        ++count[rec[i].tag];
-    uint16_t live[kIds]; // the endpoints seen in this hour, in output order
-    uint32_t seen = 0;
-    for (const uint16_t id : order) {
-      const uint32_t n = count[id] + count[id + kIds];
-      pos[id] = total;
-      total += n;
-      live[seen] = id;
-      seen += n != 0;
-    }
-    std::vector<int32_t> lat = take(latbufs);
-    lat.reserve(1 << 17);
-    lat.resize(total + 16);
-    for (const auto &[rec, n] : mine)
-      for (uint32_t i = 0; i < n; ++i)
-        lat[pos[rec[i].tag % kIds]++] = rec[i].lat ^ 0x80000000;
-
+    // Each endpoint is already a chain of exact values. Gather just one
+    // group at a time; no whole-hour counting scatter or latency array exists.
+    static thread_local std::vector<int32_t> lat;
     static thread_local std::vector<int32_t> scratch;
     std::unique_ptr<char[]> text = take(outbufs);
     if (!text)
@@ -482,10 +472,20 @@ struct Job {
     char *out = text.get(), label[22];
     std::snprintf(label, sizeof label, "%sT%02u:00:00Z ",
                   kDays[(hour + 18) / 24], (hour + 18) % 24);
-    for (uint32_t i = 0; i < seen; ++i) {
-      const uint16_t id = live[i];
-      const uint32_t errors = count[id + kIds], n = count[id] + errors;
-      int32_t *const a = lat.data() + pos[id] - n;
+    for (const uint16_t id : order) {
+      uint32_t n = 0, errors = 0;
+      for (const Chunk *chunk : mine) {
+        n += chunk->count[id];
+        errors += chunk->errors[id];
+      }
+      if (!n)
+        continue;
+      lat.resize(n + 16);
+      uint32_t at = 0;
+      for (const Chunk *chunk : mine)
+        for (uint32_t next = chunk->head[id]; next; next = chunk->rec[next - 1].next)
+          lat[at++] = chunk->rec[next - 1].lat ^ 0x80000000;
+      int32_t *const a = lat.data();
       const uint32_t ranks[3] = {(50 * n + 99) / 100 - 1, (95 * n + 99) / 100 - 1,
                                  (99 * n + 99) / 100 - 1};
       int32_t value[3];
@@ -506,9 +506,8 @@ struct Job {
     const size_t length = out - text.get();
     {
       std::lock_guard<std::mutex> lock(mu);
-      latbufs.push_back(std::move(lat));
-      for (const auto &[rec, n] : mine)
-        runbufs.push_back(rec);
+      for (Chunk *chunk : mine)
+        runbufs.push_back(chunk);
     }
     emit(hour, {std::move(text), length});
   }
