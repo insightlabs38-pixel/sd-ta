@@ -27,7 +27,7 @@ jobs:
           python tests/sizes.py "$PWD/solution"
       - name: Exact multiquantile properties
         run: |
-          g++ -O2 -march=x86-64-v3 -std=c++20 -pthread tests/selector.cpp -o /tmp/selector-test
+          g++ -O2 -march=x86-64-v3 -std=c++20 -pthread -DTEST_INPLACE tests/selector.cpp -o /tmp/selector-test
           /tmp/selector-test
       - name: Deliberate fingerprint collisions
         run: python tests/identity.py "$PWD/solution"
@@ -73,7 +73,7 @@ jobs:
             sha256sum /tmp/a-out/summary.txt
           done
           python tests/identity.py /tmp/solution-asan
-          g++ -O1 -g -fsanitize=address,undefined -march=x86-64-v3 -std=c++20 -pthread tests/selector.cpp -o /tmp/selector-asan
+          g++ -O1 -g -fsanitize=address,undefined -march=x86-64-v3 -std=c++20 -pthread -DTEST_INPLACE tests/selector.cpp -o /tmp/selector-asan
           /tmp/selector-asan
       - name: ThreadSanitizer dictionary and output smoke
         shell: bash

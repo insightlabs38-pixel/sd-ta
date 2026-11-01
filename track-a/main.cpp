@@ -84,33 +84,56 @@ struct Lanes {
 };
 constexpr Lanes kLanes;
 
-// Copies src[lo, hi) to dst so that the values below pivot come first; returns
-// how many there are. Values are int32 (latencies with the sign bit flipped).
-uint32_t split(const int32_t *src, int32_t *dst, uint32_t lo, uint32_t hi,
-               int32_t pivot) {
-  const __m256i bound = _mm256_set1_epi32(pivot);
-  uint32_t i = lo, l = lo, r = hi;
-  for (; hi - i >= 16; i += 8) {
-    const __m256i v = load(src + i);
+// In-place exact partition. Two saved edge vectors provide enough free space
+// for overlapping full-vector stores; the shorter free side is refilled first.
+uint32_t split(int32_t *a, uint32_t lo, uint32_t hi, int32_t pivot) {
+  const uint32_t begin = lo;
+  if (hi - lo < 64) {
+    while (lo < hi) {
+      while (lo < hi && a[lo] < pivot) ++lo;
+      while (lo < hi && a[hi - 1] >= pivot) --hi;
+      if (lo < hi) std::swap(a[lo++], a[--hi]);
+    }
+    return lo - begin;
+  }
+  // Leave a multiple of eight values between the scalar prefix and suffix.
+  while ((hi - lo) % 8) {
+    if (a[lo] < pivot) ++lo;
+    else std::swap(a[lo], a[--hi]);
+  }
+  const __m256i first = load(a + lo), last = load(a + hi - 8),
+                bound = _mm256_set1_epi32(pivot);
+  uint32_t left = lo, right = hi, read_left = lo + 8, read_right = hi - 8;
+  while (read_left < read_right) {
+    __m256i v;
+    if (read_left - left < right - read_right) {
+      v = load(a + read_left);
+      read_left += 8;
+    } else {
+      read_right -= 8;
+      v = load(a + read_right);
+    }
     const uint32_t m = _mm256_movemask_ps(
         _mm256_castsi256_ps(_mm256_cmpgt_epi32(bound, v)));
-    auto lanes = [&](const uint8_t *idx) {
-      return _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i *)idx));
-    };
-    const __m256i packed = _mm256_permutevar8x32_epi32(v, lanes(kLanes.order[m]));
-    _mm256_storeu_si256((__m256i *)(dst + l), packed);
-    _mm256_storeu_si256((__m256i *)(dst + r - 8), packed);
-    l += __builtin_popcount(m);
-    r -= 8 - __builtin_popcount(m);
+    const __m256i lanes = _mm256_cvtepu8_epi32(
+        _mm_loadl_epi64((const __m128i *)kLanes.order[m]));
+    const __m256i packed = _mm256_permutevar8x32_epi32(v, lanes);
+    _mm256_storeu_si256((__m256i *)(a + left), packed);
+    _mm256_storeu_si256((__m256i *)(a + right - 8), packed);
+    const uint32_t n = __builtin_popcount(m);
+    left += n;
+    right -= 8 - n;
   }
-  for (; i < hi; ++i) {
-    const int32_t v = src[i];
-    dst[l] = dst[r - 1] = v;
+  alignas(32) int32_t saved[16];
+  _mm256_store_si256((__m256i *)saved, first);
+  _mm256_store_si256((__m256i *)(saved + 8), last);
+  for (const int32_t v : saved) {
+    a[left] = a[right - 1] = v;
     const uint32_t less = v < pivot;
-    l += less;
-    r += less - 1;
+    left += less;
+    right += less - 1;
   }
-  return l - lo;
+  return left - begin;
 }
 
 // Sorts the first n <= 16 values of a (plus 16 readable slots) into out[0, 16)
@@ -147,9 +170,9 @@ void sort16(const int32_t *a, uint32_t n, int32_t *out) {
 }
 
 // Stores the values at the sorted positions k[0..nk) of a[lo, hi) into out;
-// the positions are ascending and inside the range. a and b swap roles at each
-// level (b is scratch of the same size).
-void multiselect(int32_t *a, int32_t *b, uint32_t lo, uint32_t hi,
+// the positions are ascending and inside the range. Partitioning mutates a
+// without an auxiliary array.
+void multiselect(int32_t *a, uint32_t lo, uint32_t hi,
                  const uint32_t *k, int nk, int32_t *out, int depth = 0) {
   if (hi - lo <= 16) {
     alignas(32) int32_t sorted[16];
@@ -166,27 +189,27 @@ void multiselect(int32_t *a, int32_t *b, uint32_t lo, uint32_t hi,
   }
   const int32_t x = a[lo], y = a[lo + (hi - lo) / 2], z = a[hi - 1];
   int32_t pivot = std::max(std::min(x, y), std::min(std::max(x, y), z));
-  uint32_t cut = lo + split(a, b, lo, hi, pivot);
+  uint32_t cut = lo + split(a, lo, hi, pivot);
   if (cut == lo) { // pivot is the minimum: peel off its duplicates
     if (pivot == INT32_MAX) {
       std::fill(out, out + nk, pivot);
       return;
     }
-    cut = lo + split(a, b, lo, hi, pivot + 1);
+    cut = lo + split(a, lo, hi, pivot + 1);
     for (int i = 0; i < nk && k[i] < cut; ++i)
       out[i] = pivot;
     if (cut == hi)
       return;
     int done = std::lower_bound(k, k + nk, cut) - k;
     if (done < nk)
-      multiselect(b, a, cut, hi, k + done, nk - done, out + done, depth + 1);
+      multiselect(a, cut, hi, k + done, nk - done, out + done, depth + 1);
     return;
   }
   const int left = std::lower_bound(k, k + nk, cut) - k;
   if (left)
-    multiselect(b, a, lo, cut, k, left, out, depth + 1);
+    multiselect(a, lo, cut, k, left, out, depth + 1);
   if (left < nk)
-    multiselect(b, a, cut, hi, k + left, nk - left, out + left, depth + 1);
+    multiselect(a, cut, hi, k + left, nk - left, out + left, depth + 1);
 }
 
 // Dictionary inserts are tiny and bursty at startup, so waiters spin instead of
@@ -462,7 +485,6 @@ struct Job {
       for (const auto &[rec, n] : mine)
         runbufs.push_back(rec);
     }
-    static thread_local std::vector<int32_t> scratch;
     auto result = take(resultbufs);
     if (!result)
       result = std::make_unique<Result[]>(kIds);
@@ -473,9 +495,7 @@ struct Job {
       const uint32_t ranks[3] = {(50 * n + 99) / 100 - 1, (95 * n + 99) / 100 - 1,
                                  (99 * n + 99) / 100 - 1};
       int32_t value[3];
-      if (scratch.size() < n + 16)
-        scratch.resize(n + 16);
-      multiselect(a, scratch.data(), 0, n, ranks, 3, value);
+      multiselect(a, 0, n, ranks, 3, value);
       result[i] = {n, uint32_t(value[0]) ^ 0x80000000,
                    uint32_t(value[1]) ^ 0x80000000,
                    uint32_t(value[2]) ^ 0x80000000, errors, id};
