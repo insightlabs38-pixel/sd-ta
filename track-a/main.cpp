@@ -165,7 +165,11 @@ void multiselect(int32_t *a, int32_t *b, uint32_t lo, uint32_t hi,
     return;
   }
   const int32_t x = a[lo], y = a[lo + (hi - lo) / 2], z = a[hi - 1];
-  int32_t pivot = std::max(std::min(x, y), std::min(std::max(x, y), z));
+  // Tail ranks benefit from a tail-biased sample rather than a median split.
+  const uint32_t target = k[0] - lo, width = hi - lo;
+  int32_t pivot = 3 * target < width ? std::min({x, y, z})
+                  : 3 * target > 2 * width ? std::max({x, y, z})
+                  : std::max(std::min(x, y), std::min(std::max(x, y), z));
   uint32_t cut = lo + split(a, b, lo, hi, pivot);
   if (cut == lo) { // pivot is the minimum: peel off its duplicates
     if (pivot == INT32_MAX) {
