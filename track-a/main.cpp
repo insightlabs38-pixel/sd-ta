@@ -317,6 +317,8 @@ struct Job {
   int fd;
   Names names;
   std::mutex mu, out_mu;
+  std::atomic<uint64_t> parse_cycles{0}, finalize_cycles{0},
+                        write_cycles{0}, wait_cycles{0};
   std::condition_variable cv;
   std::vector<Run> runs[kHours]; // per hour, from the registered blocks
   std::vector<int> top; // per block: its last hour, or -1 until registered
@@ -402,6 +404,7 @@ struct Job {
   }
 
   void parse(Local &local, uint32_t block) {
+    const uint64_t cycle_start = __rdtsc();
     Rec *wp[kHours]{}, *bp[kHours]{};
     Stream st[kStreams]; // interleaved streams overlap their latencies
     const char *p = align(block), *end = align(block + 1);
@@ -443,9 +446,11 @@ struct Job {
     for (++registered; watermark < nblocks && top[watermark] >= 0; ++watermark)
       prefix_max = std::max<int>(prefix_max, top[watermark]);
     cv.notify_all();
+    parse_cycles.fetch_add(__rdtsc()-cycle_start, std::memory_order_relaxed);
   }
 
   void finalize(uint32_t hour) {
+    const uint64_t cycle_start = __rdtsc();
     std::vector<Run> mine;
     std::vector<uint16_t> order;
     {
@@ -511,6 +516,7 @@ struct Job {
         runbufs.push_back(rec);
     }
     emit(hour, {std::move(text), length});
+    finalize_cycles.fetch_add(__rdtsc()-cycle_start, std::memory_order_relaxed);
   }
 
   // Whoever completes an hour writes all hours that are ready in order (a
@@ -524,6 +530,7 @@ struct Job {
     for (writing = true; written < kHours && parts[written].first; ++written) {
       Part part = std::move(parts[written]);
       lock.unlock();
+      const uint64_t write_start = __rdtsc();
       for (size_t done = 0; done < part.second;) {
         const ssize_t w =
             write(fd, part.first.get() + done, part.second - done);
@@ -531,9 +538,8 @@ struct Job {
           fail("write summary");
         done += w;
       }
+      write_cycles.fetch_add(__rdtsc()-write_start, std::memory_order_relaxed);
       end[written + 1] = end[written] + part.second;
-      if (written + 1 == kHours && ftruncate(fd, end[kHours]))
-        fail("size summary");
       sync_file_range(fd, end[written], part.second, SYNC_FILE_RANGE_WRITE);
       if (written >= kKeep)
         posix_fadvise(fd, 0, end[written - kKeep + 1], POSIX_FADV_DONTNEED);
@@ -577,27 +583,27 @@ struct Job {
                   MADV_DONTNEED);
         return;
       } else {
+        const uint64_t wait_start = __rdtsc();
         cv.wait(lock);
+        wait_cycles.fetch_add(__rdtsc()-wait_start, std::memory_order_relaxed);
       }
     }
   }
-  std::thread pool[16]; // worker i is started by worker (i - 1) / 2
-  std::atomic<uint32_t> started{1};
-  // Workers start their children before working, so that a dozen threads are up
-  // after a few thread creations instead of eleven.
-  void start(uint32_t i) {
-    for (uint32_t c = 2 * i + 1; c <= 2 * i + 2 && c < threads; ++c) {
-      pool[c] = std::thread([this, c] { start(c); });
-      started.fetch_add(1, std::memory_order_release);
-    }
-    work(i);
-  }
   bool run() {
-    start(0);
-    while (started.load(std::memory_order_acquire) < threads)
-      std::this_thread::yield();
+    const uint64_t cycle_start = __rdtsc();
+    std::vector<std::thread> pool;
     for (uint32_t i = 1; i < threads; ++i)
-      pool[i].join();
+      pool.emplace_back([this, i] { work(i); });
+    work(0);
+    for (auto &t : pool)
+      t.join();
+    if (std::getenv("SD_PROFILE"))
+      dprintf(2, "PROFILE wall_cycles=%llu parse=%llu finalize_incl_write=%llu write=%llu wait=%llu blocks=%u threads=%u late=%u\n",
+          (unsigned long long)(__rdtsc()-cycle_start),
+          (unsigned long long)parse_cycles.load(),
+          (unsigned long long)finalize_cycles.load(),
+          (unsigned long long)write_cycles.load(),
+          (unsigned long long)wait_cycles.load(), nblocks,threads,unsigned(bad));
     return !bad;
   }
 };
@@ -620,7 +626,7 @@ int main() {
     fail("map requests");
   const int fd =
       open((std::string(out ? out : "/out") + "/summary.txt").c_str(),
-           O_WRONLY | O_CREAT, 0644); // an old file is overwritten in place
+           O_WRONLY | O_CREAT | O_TRUNC, 0644);
   if (fd < 0)
     fail("open summary");
   cpu_set_t cpus{};
