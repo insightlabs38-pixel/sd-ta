@@ -1,0 +1,73 @@
+[
+  {
+    "branch": "prize/a-sol-input-references",
+    "source_commit": "0c4e198447a619130111f4d8b32cc67497137821",
+    "source_blob": "2d4561060c1d71591e82803876239e90bbb6e006",
+    "S": 592,
+    "D": 1,
+    "qualification_runs": [
+      "41332599264"
+    ]
+  },
+  {
+    "branch": "prize/a-sol-ordered-writer",
+    "source_commit": "041d90b72eaae9de7a53c0f8f7a95ca8f3cc5657",
+    "source_blob": "5e21597807f098b757b951228cab443f37f41d02",
+    "S": 568,
+    "D": 1,
+    "qualification_runs": [
+      "41332603292"
+    ]
+  },
+  {
+    "branch": "prize/a-sol-binary-hours",
+    "source_commit": "40809e3a47f15931e6ba912ac82808964fe7f217",
+    "source_blob": "b1dafb152180928b5861e272be40ace3e9c4bcbb",
+    "S": 595,
+    "D": 1,
+    "qualification_runs": [
+      "41332607587"
+    ]
+  },
+  {
+    "branch": "prize/a-sol-shared-index",
+    "source_commit": "4822ce41e3723a8066d4f7a6f2543f6a6d68a8c9",
+    "source_blob": "e6102c18d66f60a721d34e296265e3a23ebb464a",
+    "S": 565,
+    "D": 1,
+    "qualification_runs": [
+      "41332595221"
+    ]
+  },
+  {
+    "branch": "prize/a-sol-lean-pipeline",
+    "source_commit": "1961c148d35cc3a8114b68a5153dda8b271f447d",
+    "source_blob": "1ad533f716e9f898eeb0e174959bfb25cad52e85",
+    "S": 578,
+    "D": 1,
+    "qualification_runs": [
+      "41332666362",
+      "41333014119"
+    ]
+  },
+  {
+    "branch": "prize/a-sol-endpoint-chains",
+    "source_commit": "ac3a9e3eb5ba4926eb898c948f24c23ea353aa67",
+    "source_blob": "8aa3567292372a6dd624902a3fd3c43a95509687",
+    "S": 584,
+    "D": 1,
+    "qualification_runs": [
+      "41332947926"
+    ]
+  },
+  {
+    "branch": "prize/a-sol-writer-pipeline",
+    "source_commit": "b1ddc1b7477a5062e9e3b4d135761acf54f7b92f",
+    "source_blob": "3aa7f9c4de26d9839790467f812f677bad8a900e",
+    "S": 582,
+    "D": 1,
+    "qualification_runs": [
+      "41333415728"
+    ]
+  }
+]

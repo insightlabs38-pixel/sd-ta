@@ -1,0 +1,686 @@
+[
+  {
+    "conclusion": "success",
+    "databaseId": 41332595221,
+    "headBranch": "prize/a-sol-shared-index",
+    "headSha": "2779e3f286f5509c25547b4852d4d74006a8438c",
+    "jobs": [
+      {
+        "name": "verify",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "Set up job",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/checkout@v4",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/setup-python@v5",
+            "conclusion": "success"
+          },
+          {
+            "name": "Compile baseline",
+            "conclusion": "success"
+          },
+          {
+            "name": "Differential synthetic tests",
+            "conclusion": "success"
+          },
+          {
+            "name": "Endpoint length differential",
+            "conclusion": "success"
+          },
+          {
+            "name": "Dense minimum-length record differential",
+            "conclusion": "success"
+          },
+          {
+            "name": "Verify official seed-1 tiny, sample and full hashes",
+            "conclusion": "success"
+          },
+          {
+            "name": "Holdout-like seed-2 and seed-3 sample differential",
+            "conclusion": "success"
+          },
+          {
+            "name": "Reordered inputs and ASan/UBSan",
+            "conclusion": "success"
+          },
+          {
+            "name": "ThreadSanitizer dictionary and output smoke",
+            "conclusion": "success"
+          },
+          {
+            "name": "Validate Docker allowlist and offline sandbox",
+            "conclusion": "success"
+          },
+          {
+            "name": "Matched pinned-toolchain axes",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/upload-artifact@v4",
+            "conclusion": "success"
+          },
+          {
+            "name": "Post Run actions/setup-python@v5",
+            "conclusion": "success"
+          },
+          {
+            "name": "Post Run actions/checkout@v4",
+            "conclusion": "success"
+          },
+          {
+            "name": "Complete job",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "status": "completed",
+    "url": "https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41332595221"
+  },
+  {
+    "conclusion": "success",
+    "databaseId": 41332599264,
+    "headBranch": "prize/a-sol-input-references",
+    "headSha": "07acd20b398276897ca4eb139655712d649e5089",
+    "jobs": [
+      {
+        "name": "verify",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "Set up job",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/checkout@v4",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/setup-python@v5",
+            "conclusion": "success"
+          },
+          {
+            "name": "Compile baseline",
+            "conclusion": "success"
+          },
+          {
+            "name": "Differential synthetic tests",
+            "conclusion": "success"
+          },
+          {
+            "name": "Endpoint length differential",
+            "conclusion": "success"
+          },
+          {
+            "name": "Dense minimum-length record differential",
+            "conclusion": "success"
+          },
+          {
+            "name": "Verify official seed-1 tiny, sample and full hashes",
+            "conclusion": "success"
+          },
+          {
+            "name": "Holdout-like seed-2 and seed-3 sample differential",
+            "conclusion": "success"
+          },
+          {
+            "name": "Reordered inputs and ASan/UBSan",
+            "conclusion": "success"
+          },
+          {
+            "name": "ThreadSanitizer dictionary and output smoke",
+            "conclusion": "success"
+          },
+          {
+            "name": "Validate Docker allowlist and offline sandbox",
+            "conclusion": "success"
+          },
+          {
+            "name": "Matched pinned-toolchain axes",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/upload-artifact@v4",
+            "conclusion": "success"
+          },
+          {
+            "name": "Post Run actions/setup-python@v5",
+            "conclusion": "success"
+          },
+          {
+            "name": "Post Run actions/checkout@v4",
+            "conclusion": "success"
+          },
+          {
+            "name": "Complete job",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "status": "completed",
+    "url": "https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41332599264"
+  },
+  {
+    "conclusion": "success",
+    "databaseId": 41332603292,
+    "headBranch": "prize/a-sol-ordered-writer",
+    "headSha": "7ca38b33912749a3399ecb8d3b60b353b4d54b61",
+    "jobs": [
+      {
+        "name": "verify",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "Set up job",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/checkout@v4",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/setup-python@v5",
+            "conclusion": "success"
+          },
+          {
+            "name": "Compile baseline",
+            "conclusion": "success"
+          },
+          {
+            "name": "Differential synthetic tests",
+            "conclusion": "success"
+          },
+          {
+            "name": "Endpoint length differential",
+            "conclusion": "success"
+          },
+          {
+            "name": "Dense minimum-length record differential",
+            "conclusion": "success"
+          },
+          {
+            "name": "Verify official seed-1 tiny, sample and full hashes",
+            "conclusion": "success"
+          },
+          {
+            "name": "Holdout-like seed-2 and seed-3 sample differential",
+            "conclusion": "success"
+          },
+          {
+            "name": "Reordered inputs and ASan/UBSan",
+            "conclusion": "success"
+          },
+          {
+            "name": "ThreadSanitizer dictionary and output smoke",
+            "conclusion": "success"
+          },
+          {
+            "name": "Validate Docker allowlist and offline sandbox",
+            "conclusion": "success"
+          },
+          {
+            "name": "Matched pinned-toolchain axes",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/upload-artifact@v4",
+            "conclusion": "success"
+          },
+          {
+            "name": "Post Run actions/setup-python@v5",
+            "conclusion": "success"
+          },
+          {
+            "name": "Post Run actions/checkout@v4",
+            "conclusion": "success"
+          },
+          {
+            "name": "Complete job",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "status": "completed",
+    "url": "https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41332603292"
+  },
+  {
+    "conclusion": "success",
+    "databaseId": 41332607587,
+    "headBranch": "prize/a-sol-binary-hours",
+    "headSha": "b54ce6e6e09d70665f851b96e29c380a386e3e20",
+    "jobs": [
+      {
+        "name": "verify",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "Set up job",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/checkout@v4",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/setup-python@v5",
+            "conclusion": "success"
+          },
+          {
+            "name": "Compile baseline",
+            "conclusion": "success"
+          },
+          {
+            "name": "Differential synthetic tests",
+            "conclusion": "success"
+          },
+          {
+            "name": "Endpoint length differential",
+            "conclusion": "success"
+          },
+          {
+            "name": "Dense minimum-length record differential",
+            "conclusion": "success"
+          },
+          {
+            "name": "Verify official seed-1 tiny, sample and full hashes",
+            "conclusion": "success"
+          },
+          {
+            "name": "Holdout-like seed-2 and seed-3 sample differential",
+            "conclusion": "success"
+          },
+          {
+            "name": "Reordered inputs and ASan/UBSan",
+            "conclusion": "success"
+          },
+          {
+            "name": "ThreadSanitizer dictionary and output smoke",
+            "conclusion": "success"
+          },
+          {
+            "name": "Validate Docker allowlist and offline sandbox",
+            "conclusion": "success"
+          },
+          {
+            "name": "Matched pinned-toolchain axes",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/upload-artifact@v4",
+            "conclusion": "success"
+          },
+          {
+            "name": "Post Run actions/setup-python@v5",
+            "conclusion": "success"
+          },
+          {
+            "name": "Post Run actions/checkout@v4",
+            "conclusion": "success"
+          },
+          {
+            "name": "Complete job",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "status": "completed",
+    "url": "https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41332607587"
+  },
+  {
+    "conclusion": "success",
+    "databaseId": 41332666362,
+    "headBranch": "prize/a-sol-lean-pipeline",
+    "headSha": "1961c148d35cc3a8114b68a5153dda8b271f447d",
+    "jobs": [
+      {
+        "name": "verify",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "Set up job",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/checkout@v4",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/setup-python@v5",
+            "conclusion": "success"
+          },
+          {
+            "name": "Compile baseline",
+            "conclusion": "success"
+          },
+          {
+            "name": "Differential synthetic tests",
+            "conclusion": "success"
+          },
+          {
+            "name": "Endpoint length differential",
+            "conclusion": "success"
+          },
+          {
+            "name": "Dense minimum-length record differential",
+            "conclusion": "success"
+          },
+          {
+            "name": "Verify official seed-1 tiny, sample and full hashes",
+            "conclusion": "success"
+          },
+          {
+            "name": "Holdout-like seed-2 and seed-3 sample differential",
+            "conclusion": "success"
+          },
+          {
+            "name": "Reordered inputs and ASan/UBSan",
+            "conclusion": "success"
+          },
+          {
+            "name": "ThreadSanitizer dictionary and output smoke",
+            "conclusion": "success"
+          },
+          {
+            "name": "Validate Docker allowlist and offline sandbox",
+            "conclusion": "success"
+          },
+          {
+            "name": "Matched pinned-toolchain axes",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/upload-artifact@v4",
+            "conclusion": "success"
+          },
+          {
+            "name": "Post Run actions/setup-python@v5",
+            "conclusion": "success"
+          },
+          {
+            "name": "Post Run actions/checkout@v4",
+            "conclusion": "success"
+          },
+          {
+            "name": "Complete job",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "status": "completed",
+    "url": "https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41332666362"
+  },
+  {
+    "conclusion": "success",
+    "databaseId": 41333014119,
+    "headBranch": "prize/a-sol-lean-pipeline",
+    "headSha": "27a8927f4a80bca0ac5c009be3f02b505c137152",
+    "jobs": [
+      {
+        "name": "verify",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "Set up job",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/checkout@v4",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/setup-python@v5",
+            "conclusion": "success"
+          },
+          {
+            "name": "Compile baseline",
+            "conclusion": "success"
+          },
+          {
+            "name": "Differential synthetic tests",
+            "conclusion": "success"
+          },
+          {
+            "name": "Endpoint length differential",
+            "conclusion": "success"
+          },
+          {
+            "name": "Deliberate fingerprint collisions",
+            "conclusion": "success"
+          },
+          {
+            "name": "Dense minimum-length record differential",
+            "conclusion": "success"
+          },
+          {
+            "name": "Verify official seed-1 tiny, sample and full hashes",
+            "conclusion": "success"
+          },
+          {
+            "name": "Holdout-like seed-2 and seed-3 sample differential",
+            "conclusion": "success"
+          },
+          {
+            "name": "Reordered inputs and ASan/UBSan",
+            "conclusion": "success"
+          },
+          {
+            "name": "ThreadSanitizer dictionary and output smoke",
+            "conclusion": "success"
+          },
+          {
+            "name": "Validate Docker allowlist and offline sandbox",
+            "conclusion": "success"
+          },
+          {
+            "name": "Matched pinned-toolchain axes",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/upload-artifact@v4",
+            "conclusion": "success"
+          },
+          {
+            "name": "Post Run actions/setup-python@v5",
+            "conclusion": "success"
+          },
+          {
+            "name": "Post Run actions/checkout@v4",
+            "conclusion": "success"
+          },
+          {
+            "name": "Complete job",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "status": "completed",
+    "url": "https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41333014119"
+  },
+  {
+    "conclusion": "success",
+    "databaseId": 41332947926,
+    "headBranch": "prize/a-sol-endpoint-chains",
+    "headSha": "04fd8a63871bc66bb8822393a2b637a2dab4c5f3",
+    "jobs": [
+      {
+        "name": "verify",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "Set up job",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/checkout@v4",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/setup-python@v5",
+            "conclusion": "success"
+          },
+          {
+            "name": "Compile baseline",
+            "conclusion": "success"
+          },
+          {
+            "name": "Differential synthetic tests",
+            "conclusion": "success"
+          },
+          {
+            "name": "Endpoint length differential",
+            "conclusion": "success"
+          },
+          {
+            "name": "Deliberate fingerprint collisions",
+            "conclusion": "success"
+          },
+          {
+            "name": "Dense minimum-length record differential",
+            "conclusion": "success"
+          },
+          {
+            "name": "Verify official seed-1 tiny, sample and full hashes",
+            "conclusion": "success"
+          },
+          {
+            "name": "Holdout-like seed-2 and seed-3 sample differential",
+            "conclusion": "success"
+          },
+          {
+            "name": "Reordered inputs and ASan/UBSan",
+            "conclusion": "success"
+          },
+          {
+            "name": "ThreadSanitizer dictionary and output smoke",
+            "conclusion": "success"
+          },
+          {
+            "name": "Validate Docker allowlist and offline sandbox",
+            "conclusion": "success"
+          },
+          {
+            "name": "Matched pinned-toolchain axes",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/upload-artifact@v4",
+            "conclusion": "success"
+          },
+          {
+            "name": "Post Run actions/setup-python@v5",
+            "conclusion": "success"
+          },
+          {
+            "name": "Post Run actions/checkout@v4",
+            "conclusion": "success"
+          },
+          {
+            "name": "Complete job",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "status": "completed",
+    "url": "https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41332947926"
+  },
+  {
+    "conclusion": "success",
+    "databaseId": 41333415728,
+    "headBranch": "prize/a-sol-writer-pipeline",
+    "headSha": "b1ddc1b7477a5062e9e3b4d135761acf54f7b92f",
+    "jobs": [
+      {
+        "name": "verify",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "Set up job",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/checkout@v4",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/setup-python@v5",
+            "conclusion": "success"
+          },
+          {
+            "name": "Compile baseline",
+            "conclusion": "success"
+          },
+          {
+            "name": "Differential synthetic tests",
+            "conclusion": "success"
+          },
+          {
+            "name": "Endpoint length differential",
+            "conclusion": "success"
+          },
+          {
+            "name": "Deliberate fingerprint collisions",
+            "conclusion": "success"
+          },
+          {
+            "name": "Dense minimum-length record differential",
+            "conclusion": "success"
+          },
+          {
+            "name": "Verify official seed-1 tiny, sample and full hashes",
+            "conclusion": "success"
+          },
+          {
+            "name": "Holdout-like seed-2 and seed-3 sample differential",
+            "conclusion": "success"
+          },
+          {
+            "name": "Reordered inputs and ASan/UBSan",
+            "conclusion": "success"
+          },
+          {
+            "name": "ThreadSanitizer dictionary and output smoke",
+            "conclusion": "success"
+          },
+          {
+            "name": "Validate Docker allowlist and offline sandbox",
+            "conclusion": "success"
+          },
+          {
+            "name": "Matched pinned-toolchain axes",
+            "conclusion": "success"
+          },
+          {
+            "name": "Run actions/upload-artifact@v4",
+            "conclusion": "success"
+          },
+          {
+            "name": "Post Run actions/setup-python@v5",
+            "conclusion": "success"
+          },
+          {
+            "name": "Post Run actions/checkout@v4",
+            "conclusion": "success"
+          },
+          {
+            "name": "Complete job",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "status": "completed",
+    "url": "https://github.com/insightlabs38-pixel/sd-ta/actions/runs/41333415728"
+  }
+]

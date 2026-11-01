@@ -1,0 +1,542 @@
+[
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 0,
+    "name": "champion",
+    "peak": 5263360,
+    "end_anon": 229376,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 0,
+    "name": "candidate",
+    "peak": 5984256,
+    "end_anon": 217088,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 1,
+    "name": "candidate",
+    "peak": 5599232,
+    "end_anon": 212992,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 1,
+    "name": "champion",
+    "peak": 5152768,
+    "end_anon": 217088,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 2,
+    "name": "champion",
+    "peak": 5070848,
+    "end_anon": 217088,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 2,
+    "name": "candidate",
+    "peak": 5885952,
+    "end_anon": 221184,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 3,
+    "name": "candidate",
+    "peak": 5836800,
+    "end_anon": 229376,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 3,
+    "name": "champion",
+    "peak": 4759552,
+    "end_anon": 217088,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 4,
+    "name": "candidate",
+    "peak": 5992448,
+    "end_anon": 221184,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 4,
+    "name": "champion",
+    "peak": 5079040,
+    "end_anon": 225280,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 5,
+    "name": "candidate",
+    "peak": 5836800,
+    "end_anon": 221184,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 5,
+    "name": "champion",
+    "peak": 5001216,
+    "end_anon": 221184,
+    "end_file": 307200
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 6,
+    "name": "champion",
+    "peak": 5263360,
+    "end_anon": 221184,
+    "end_file": 303104
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 6,
+    "name": "candidate",
+    "peak": 5906432,
+    "end_anon": 221184,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 7,
+    "name": "champion",
+    "peak": 5001216,
+    "end_anon": 212992,
+    "end_file": 303104
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 7,
+    "name": "candidate",
+    "peak": 5677056,
+    "end_anon": 217088,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 8,
+    "name": "candidate",
+    "peak": 5660672,
+    "end_anon": 229376,
+    "end_file": 303104
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 8,
+    "name": "champion",
+    "peak": 5271552,
+    "end_anon": 221184,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 9,
+    "name": "candidate",
+    "peak": 5808128,
+    "end_anon": 217088,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 9,
+    "name": "champion",
+    "peak": 5955584,
+    "end_anon": 225280,
+    "end_file": 303104
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 10,
+    "name": "champion",
+    "peak": 5148672,
+    "end_anon": 225280,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 10,
+    "name": "candidate",
+    "peak": 5791744,
+    "end_anon": 225280,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 11,
+    "name": "champion",
+    "peak": 5152768,
+    "end_anon": 225280,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 11,
+    "name": "candidate",
+    "peak": 5677056,
+    "end_anon": 221184,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 12,
+    "name": "champion",
+    "peak": 4997120,
+    "end_anon": 225280,
+    "end_file": 303104
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 12,
+    "name": "candidate",
+    "peak": 5705728,
+    "end_anon": 225280,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 13,
+    "name": "champion",
+    "peak": 5017600,
+    "end_anon": 217088,
+    "end_file": 303104
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 13,
+    "name": "candidate",
+    "peak": 5513216,
+    "end_anon": 221184,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 14,
+    "name": "champion",
+    "peak": 4997120,
+    "end_anon": 217088,
+    "end_file": 303104
+  },
+  {
+    "seed": 1,
+    "threads": 2,
+    "trial": 14,
+    "name": "candidate",
+    "peak": 5615616,
+    "end_anon": 225280,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 0,
+    "name": "champion",
+    "peak": 12439552,
+    "end_anon": 221184,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 0,
+    "name": "candidate",
+    "peak": 14340096,
+    "end_anon": 221184,
+    "end_file": 307200
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 1,
+    "name": "champion",
+    "peak": 12898304,
+    "end_anon": 221184,
+    "end_file": 303104
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 1,
+    "name": "candidate",
+    "peak": 14151680,
+    "end_anon": 217088,
+    "end_file": 303104
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 2,
+    "name": "candidate",
+    "peak": 13094912,
+    "end_anon": 217088,
+    "end_file": 307200
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 2,
+    "name": "champion",
+    "peak": 10981376,
+    "end_anon": 217088,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 3,
+    "name": "candidate",
+    "peak": 16691200,
+    "end_anon": 217088,
+    "end_file": 303104
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 3,
+    "name": "champion",
+    "peak": 12169216,
+    "end_anon": 221184,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 4,
+    "name": "candidate",
+    "peak": 12537856,
+    "end_anon": 221184,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 4,
+    "name": "champion",
+    "peak": 9891840,
+    "end_anon": 225280,
+    "end_file": 307200
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 5,
+    "name": "candidate",
+    "peak": 11866112,
+    "end_anon": 221184,
+    "end_file": 307200
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 5,
+    "name": "champion",
+    "peak": 12161024,
+    "end_anon": 221184,
+    "end_file": 307200
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 6,
+    "name": "candidate",
+    "peak": 11882496,
+    "end_anon": 225280,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 6,
+    "name": "champion",
+    "peak": 12533760,
+    "end_anon": 225280,
+    "end_file": 303104
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 7,
+    "name": "champion",
+    "peak": 10993664,
+    "end_anon": 229376,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 7,
+    "name": "candidate",
+    "peak": 12873728,
+    "end_anon": 225280,
+    "end_file": 303104
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 8,
+    "name": "candidate",
+    "peak": 13357056,
+    "end_anon": 217088,
+    "end_file": 307200
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 8,
+    "name": "champion",
+    "peak": 12406784,
+    "end_anon": 221184,
+    "end_file": 311296
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 9,
+    "name": "candidate",
+    "peak": 12259328,
+    "end_anon": 217088,
+    "end_file": 307200
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 9,
+    "name": "champion",
+    "peak": 11661312,
+    "end_anon": 221184,
+    "end_file": 299008
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 10,
+    "name": "champion",
+    "peak": 11825152,
+    "end_anon": 221184,
+    "end_file": 307200
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 10,
+    "name": "candidate",
+    "peak": 13791232,
+    "end_anon": 217088,
+    "end_file": 307200
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 11,
+    "name": "candidate",
+    "peak": 13565952,
+    "end_anon": 221184,
+    "end_file": 307200
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 11,
+    "name": "champion",
+    "peak": 12931072,
+    "end_anon": 221184,
+    "end_file": 307200
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 12,
+    "name": "candidate",
+    "peak": 12914688,
+    "end_anon": 221184,
+    "end_file": 307200
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 12,
+    "name": "champion",
+    "peak": 11767808,
+    "end_anon": 225280,
+    "end_file": 307200
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 13,
+    "name": "champion",
+    "peak": 12029952,
+    "end_anon": 225280,
+    "end_file": 307200
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 13,
+    "name": "candidate",
+    "peak": 11673600,
+    "end_anon": 217088,
+    "end_file": 303104
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 14,
+    "name": "candidate",
+    "peak": 13705216,
+    "end_anon": 225280,
+    "end_file": 307200
+  },
+  {
+    "seed": 1,
+    "threads": 12,
+    "trial": 14,
+    "name": "champion",
+    "peak": 14065664,
+    "end_anon": 221184,
+    "end_file": 299008
+  }
+]

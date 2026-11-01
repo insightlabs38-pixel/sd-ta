@@ -1,0 +1,98 @@
+[
+  {
+    "branch": "prize/a-sol-input-references",
+    "run": "41332599264",
+    "source_blob": "2d4561060c1d71591e82803876239e90bbb6e006",
+    "S": 592,
+    "D": 1,
+    "T_ratio": 1.00985049777174,
+    "M_ratio": 0.9988758704163624,
+    "projected_T": 0.016549429957483274,
+    "projected_M": 21320262.290389664,
+    "proxy_K": 49.625638352459745
+  },
+  {
+    "branch": "prize/a-sol-ordered-writer",
+    "run": "41332603292",
+    "source_blob": "5e21597807f098b757b951228cab443f37f41d02",
+    "S": 568,
+    "D": 1,
+    "T_ratio": 1.0776090789879142,
+    "M_ratio": 1.2909926214588778,
+    "projected_T": 0.01765985758645394,
+    "projected_M": 27555277.006529383,
+    "proxy_K": 45.921660703770385
+  },
+  {
+    "branch": "prize/a-sol-binary-hours",
+    "run": "41332607587",
+    "source_blob": "b1dafb152180928b5861e272be40ace3e9c4bcbb",
+    "S": 595,
+    "D": 1,
+    "T_ratio": 0.9891545105303191,
+    "M_ratio": 0.8774660997999748,
+    "projected_T": 0.01621026411857087,
+    "projected_M": 18728861.06545221,
+    "proxy_K": 51.419698589923044
+  },
+  {
+    "branch": "prize/a-sol-shared-index",
+    "run": "41332595221",
+    "source_blob": "e6102c18d66f60a721d34e296265e3a23ebb464a",
+    "S": 565,
+    "D": 1,
+    "T_ratio": 0.9586103339870449,
+    "M_ratio": 0.989512131829631,
+    "projected_T": 0.01570970615337969,
+    "projected_M": 21120400.256877393,
+    "proxy_K": 51.38929546203444
+  },
+  {
+    "branch": "prize/a-sol-lean-pipeline",
+    "run": "41332666362",
+    "source_blob": "1ad533f716e9f898eeb0e174959bfb25cad52e85",
+    "S": 578,
+    "D": 1,
+    "T_ratio": 0.9474187803291777,
+    "M_ratio": 0.8877476204977527,
+    "projected_T": 0.015526298972034565,
+    "projected_M": 18948312.47529488,
+    "proxy_K": 52.646212795844015
+  },
+  {
+    "branch": "prize/a-sol-lean-pipeline",
+    "run": "41333014119",
+    "source_blob": "1ad533f716e9f898eeb0e174959bfb25cad52e85",
+    "S": 578,
+    "D": 1,
+    "T_ratio": 0.9488849473484766,
+    "M_ratio": 0.8441376122119417,
+    "projected_T": 0.015550326517146834,
+    "projected_M": 18017489.29428041,
+    "proxy_K": 53.13817123533127
+  },
+  {
+    "branch": "prize/a-sol-endpoint-chains",
+    "run": "41332947926",
+    "source_blob": "8aa3567292372a6dd624902a3fd3c43a95509687",
+    "S": 584,
+    "D": 1,
+    "T_ratio": 1.2549445790312312,
+    "M_ratio": 1.1000175774627257,
+    "projected_T": 0.020566031761163818,
+    "projected_M": 23479056.777864248,
+    "proxy_K": 43.75534204564354
+  },
+  {
+    "branch": "prize/a-sol-writer-pipeline",
+    "run": "41333415728",
+    "source_blob": "3aa7f9c4de26d9839790467f812f677bad8a900e",
+    "S": 582,
+    "D": 1,
+    "T_ratio": 0.959751829325609,
+    "M_ratio": 0.8656830055616406,
+    "projected_T": 0.01572841297898808,
+    "projected_M": 18477359.68555708,
+    "proxy_K": 52.51646780989715
+  }
+]
