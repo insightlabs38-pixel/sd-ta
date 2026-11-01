@@ -35,6 +35,7 @@ jobs:
           docker build --network=none --pull=false -t sd-track-a-pgo -f track-a/Dockerfile track-a
           test "$(docker image inspect sd-track-a-pgo --format '{{.Size}}')" -lt 2000000000
           mkdir -p /tmp/a-champion
+          git fetch --depth=1 origin 4aa987898640222750cd5ee68500c3f3b9967375
           git show 4aa987898640222750cd5ee68500c3f3b9967375:track-a/main.cpp > /tmp/a-champion/main.cpp
           git show 4aa987898640222750cd5ee68500c3f3b9967375:track-a/Dockerfile > /tmp/a-champion/Dockerfile
           docker build --network=none --pull=false -t sd-track-a-champion -f /tmp/a-champion/Dockerfile /tmp/a-champion
