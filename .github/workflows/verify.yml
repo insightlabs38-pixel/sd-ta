@@ -162,5 +162,52 @@ jobs:
             done
             echo "$label max5=$peak" | tee -a /tmp/summary.txt
           done
+      - name: Paired GCC 15 PGO versus identical unprofiled Docker build
+        if: github.ref == 'refs/heads/a/pgo-build-profile'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin 306c538a4c2d9bdbcf830652f947df69fa5ca213
+          mkdir -p /tmp/a-plain
+          git show 306c538a4c2d9bdbcf830652f947df69fa5ca213:track-a/Dockerfile > /tmp/a-plain/Dockerfile
+          cp track-a/main.cpp /tmp/a-plain/main.cpp
+          docker build --network=none --pull=false -t sd-a-plain -f /tmp/a-plain/Dockerfile /tmp/a-plain
+          for label in plain pgo; do
+            image=sd-a-plain
+            if [ "$label" = pgo ]; then image=sd-track-a; fi
+            docker create --name "sd-a-copy-$label" "$image" >/dev/null
+            docker cp "sd-a-copy-$label:/solution" "/tmp/a-$label-bin"
+            docker rm "sd-a-copy-$label" >/dev/null
+          done
+          python - <<'PY' | tee -a /tmp/summary.txt
+          import hashlib, os, random, statistics, subprocess, time
+          expected = '495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3'
+          env = dict(os.environ, SD_DATA_DIR='/tmp/a-full', SD_OUT_DIR='/tmp/a-out')
+          binaries = {'plain': '/tmp/a-plain-bin', 'pgo': '/tmp/a-pgo-bin'}
+          samples = {name: [] for name in binaries}
+          rng = random.Random(20261101)
+          for _ in range(31):
+              names = list(binaries)
+              rng.shuffle(names)
+              for name in names:
+                  start = time.perf_counter()
+                  subprocess.run([binaries[name]], check=True, env=env)
+                  samples[name].append(time.perf_counter() - start)
+                  with open('/tmp/a-out/summary.txt', 'rb') as f:
+                      assert hashlib.sha256(f.read()).hexdigest() == expected
+          med = {name: statistics.median(times) for name, times in samples.items()}
+          print(f'GCC15 Docker binaries paired 31-run full medians: plain={med["plain"]:.6f}s pgo={med["pgo"]:.6f}s ratio={med["pgo"]/med["plain"]:.4f}', flush=True)
+          PY
+          for label in plain pgo; do
+            image=sd-a-plain
+            if [ "$label" = pgo ]; then image=sd-track-a; fi
+            for trial in 1 2 3 4 5; do
+              peak=$(docker run --rm --network=none --read-only --memory=8g --memory-swap=8g --pids-limit=512 --tmpfs /tmp:rw,size=1g \
+                --mount type=bind,source=/tmp/a-full,target=/data,readonly \
+                --mount type=bind,source=/tmp/a-container-out,target=/out \
+                --entrypoint /bin/sh "$image" -c '/solution && cat /sys/fs/cgroup/memory.peak')
+              echo "GCC15 $label trial=$trial memory.peak=$peak" | tee -a /tmp/summary.txt
+            done
+          done
       - name: Summary
         run: cat /tmp/summary.txt
