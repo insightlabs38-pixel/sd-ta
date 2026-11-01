@@ -1,7 +1,7 @@
 name: Track A exactness
 on:
   push:
-    branches: [main, 'research/a-breakthrough-20261101-word4-sidecar']
+    branches: [main, 'research/a-breakthrough-20261101-word4-reserve']
   workflow_dispatch:
 jobs:
   verify:
@@ -192,7 +192,7 @@ jobs:
                       with open('/tmp/a-out/summary.txt','rb') as f:
                           assert hashlib.sha256(f.read()).hexdigest()==expected
               a,b=[statistics.median(times[name]) for name in ('champion','certificate')]
-              print(f'SIDECAR_THREADS={threads} latest-main={a:.6f}s certificate={b:.6f}s ratio={b/a:.4f}',flush=True)
+              print(f'RESERVE_THREADS={threads} latest-main={a:.6f}s certificate={b:.6f}s ratio={b/a:.4f}',flush=True)
           PY
 
       - name: Two-stage cache versus certified map matched controls
@@ -219,5 +219,5 @@ jobs:
                       with open('/tmp/a-out/summary.txt','rb') as f:
                           assert hashlib.sha256(f.read()).hexdigest()==expected
               a,b=(statistics.median(times[k]) for k in cases)
-              print(f'SIDECAR_VS_CERT_THREADS={threads} certificate={a:.6f}s cached={b:.6f}s ratio={b/a:.4f}',flush=True)
+              print(f'RESERVE_VS_CERT_THREADS={threads} certificate={a:.6f}s cached={b:.6f}s ratio={b/a:.4f}',flush=True)
           PY
