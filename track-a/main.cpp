@@ -225,6 +225,7 @@ struct Names {
 struct Local { // one worker's private open-addressing view of the dictionary
   static constexpr uint32_t kSlots = 1 << 14;
   uint16_t slot[kSlots]{}, next[kIds]{}; // bucket head and chain links
+  uint8_t ambiguous[kIds]{};
   uint32_t synced = 0;
   bool certified = false; // every legal endpoint has been discovered
 
@@ -235,14 +236,15 @@ struct Local { // one worker's private open-addressing view of the dictionary
   }
   int lookup(const Names &names, const char *ep, uint32_t n, uint32_t h) const {
     uint16_t entry = slot[h >> 18];
-    // A singleton bucket certifies identity after all 1842 names are known.
-    // Colliding buckets always compare the complete endpoint exactly.
-    if (certified && entry && !next[entry - 1])
-      return entry - 1;
     while (entry) {
       const uint32_t id = entry - 1;
-      if (names.same(id, ep, n))
+      if (certified) {
+        if (names.hash[id] == h &&
+            (!ambiguous[id] || names.same(id, ep, n)))
+          return id;
+      } else if (names.same(id, ep, n)) {
         return id;
+      }
       entry = next[id];
     }
     return -1;
@@ -252,8 +254,17 @@ struct Local { // one worker's private open-addressing view of the dictionary
     for (const uint32_t end = names.size.load(std::memory_order_acquire);
          synced < end; ++synced)
       put(names.hash[synced], synced);
-    if (synced == 1842)
+    if (synced == 1842 && !certified) {
+      for (uint32_t id = 0; id < 1842; ++id) {
+        const uint32_t h = names.hash[id];
+        for (uint16_t entry = slot[h >> 18]; entry; entry = next[entry - 1]) {
+          const uint32_t other = entry - 1;
+          if (other != id && names.hash[other] == h)
+            ambiguous[id] = ambiguous[other] = 1;
+        }
+      }
       certified = true;
+    }
   }
   uint32_t add(Names &names, const char *ep, uint32_t n, uint32_t h) {
     sync(names);
