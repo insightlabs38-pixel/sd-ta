@@ -1,7 +1,7 @@
 name: Track A exactness
 on:
   push:
-    branches: [main, 'research/a-breakthrough-20261101-catalog-cert']
+    branches: [main, 'research/a-breakthrough-20261101-cert-axes']
   workflow_dispatch:
 jobs:
   verify:
@@ -192,3 +192,24 @@ jobs:
               a,b=[statistics.median(times[name]) for name in ('champion','certificate')]
               print(f'CERT_THREADS={threads} latest-main={a:.6f}s certificate={b:.6f}s ratio={b/a:.4f}',flush=True)
           PY
+
+      - name: Scored-style five-run current-main versus certified cgroup peaks
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/current-main-axes
+          git fetch --depth=1 origin main
+          git show FETCH_HEAD:track-a/main.cpp > /tmp/current-main-axes/main.cpp
+          cp track-a/Dockerfile /tmp/current-main-axes/Dockerfile
+          docker build --network=none --pull=false -t sd-current-main-axes -f /tmp/current-main-axes/Dockerfile /tmp/current-main-axes
+          for label in current-main certificate; do
+            image=sd-current-main-axes
+            if [ "$label" = certificate ]; then image=sd-track-a; fi
+            max=0
+            for i in 1 2 3 4 5; do
+              peak=$(docker run --rm --network=none --read-only --memory=8g --memory-swap=8g --pids-limit=512 --tmpfs /tmp:rw,size=1g                 --mount type=bind,source=/tmp/a-full,target=/data,readonly                 --mount type=bind,source=/tmp/a-container-out,target=/out                 --entrypoint /bin/sh "$image" -c '/solution && cat /sys/fs/cgroup/memory.peak')
+              echo "AXES_M $label trial=$i peak=$peak"
+              if ((peak>max)); then max=$peak; fi
+            done
+            echo "AXES_M $label max5=$max"
+          done
