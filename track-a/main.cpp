@@ -10,6 +10,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <immintrin.h>
+#include <mutex>
 #include <sched.h>
 #include <string>
 #include <string_view>
@@ -57,9 +58,18 @@ struct Local {
   }
   void parse(const char *p, const char *end) {
     while (p < end) {
-      const char *q = (const char *)memchr(p + 28, ' ', 8);
-      const char *ep = q + 1;
-      q = (const char *)memchr(ep, ' ', 126);
+      const char *method = p + 28;
+      __m256i sp = _mm256_set1_epi8(' ');
+      uint32_t m = _mm256_movemask_epi8(
+          _mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i*)method),sp));
+      const char *ep = method + __builtin_ctz(m) + 1;
+      const char *q = ep;
+      for (;;) {
+        m = _mm256_movemask_epi8(
+            _mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i*)q),sp));
+        if (m) {q += __builtin_ctz(m); break;}
+        q += 32;
+      }
       const uint16_t id = intern(ep, uint32_t(q - ep));
       const bool error = q[1] == '5';
       const char *s = q + 5;
@@ -127,6 +137,29 @@ const char *base;
 size_t nbytes, nblocks;
 std::vector<Block> blocks;
 std::string output[H];
+bool ready[H]{};
+std::mutex output_mu;
+uint32_t written = 0;
+size_t bytes_written = 0;
+int out_fd = -1;
+void emit(size_t h, std::string part) {
+  std::lock_guard<std::mutex> guard(output_mu);
+  output[h] = std::move(part);
+  ready[h] = true;
+  while (written < H && ready[written]) {
+    std::string &s = output[written];
+    for (size_t off = 0; off < s.size();) {
+      ssize_t n = write(out_fd, s.data()+off, s.size()-off);
+      if (n <= 0) die("write summary");
+      off += n;
+    }
+    bytes_written += s.size();
+    if (written > 2)
+      posix_fadvise(out_fd, 0, bytes_written - s.size(), POSIX_FADV_DONTNEED);
+    std::string().swap(s);
+    ++written;
+  }
+}
 std::atomic<size_t> next_block{0}, next_hour{0};
 const char *aligned(size_t k) {
   const size_t off = std::min(nbytes,k*size_t(BLOCK));
@@ -155,7 +188,7 @@ void run_hours() {
     for (const Block &b : blocks)
       for (const Span &s : b.spans)
         if (s.h==h) state.parse(s.a,s.b);
-    if (!state.records.empty()) output[h]=state.finish(h);
+    emit(h, state.records.empty() ? std::string() : state.finish(h));
   }
 }
 template <class F> void parallel(uint32_t threads, F f) {
@@ -182,17 +215,9 @@ int main() {
   const uint32_t threads=std::max(1u,std::min(16u,forced?
               uint32_t(atoi(forced)):uint32_t(CPU_COUNT(&cpus))));
   parallel(threads,build_index);
-  parallel(threads,run_hours);
   std::string dest=std::string(o?o:"/out")+"/summary.txt";
-  int fd=open(dest.c_str(),O_WRONLY|O_CREAT|O_TRUNC,0644);
-  if(fd<0) die("open summary");
-  for(auto &s:output) {
-    size_t off=0;
-    while(off<s.size()) {
-      ssize_t n=write(fd,s.data()+off,s.size()-off);
-      if(n<=0) die("write summary");
-      off+=n;
-    }
-  }
+  out_fd=open(dest.c_str(),O_WRONLY|O_CREAT|O_TRUNC,0644);
+  if(out_fd<0) die("open summary");
+  parallel(threads,run_hours);
   _exit(0);
 }
