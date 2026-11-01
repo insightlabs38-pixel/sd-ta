@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <immintrin.h>
 #include <memory>
+#include <malloc.h>
 #include <mutex>
 #include <sched.h>
 #include <sys/mman.h>
@@ -593,6 +594,9 @@ struct Job {
 } // namespace
 
 int main() {
+  // Keep large transient vectors reclaimable and bound per-thread arena growth.
+  mallopt(M_MMAP_THRESHOLD, 64 << 10);
+  mallopt(M_ARENA_MAX, 2);
   const char *const dir = std::getenv("SD_DATA_DIR"),
                     *const out = std::getenv("SD_OUT_DIR"),
                     *const forced = std::getenv("SD_THREADS");
