@@ -230,6 +230,19 @@ struct Local { // one worker's private open-addressing view of the dictionary
   // Once all are published, a unique fingerprint certifies exact identity.
   uint8_t ambiguous[kIds]{};
   bool certified = false;
+  // Fast lane: a unique first eight endpoint bytes identify a known key only
+  // after the frozen catalogue is complete. Colliding buckets fall back exactly.
+  static constexpr uint32_t kFastSlots = 1 << 14;
+  uint16_t prefix[kFastSlots]{};
+  int prefix_find(const Names &names, const char *ep) const {
+    if (!certified) return -1;
+    const uint64_t head = load64(ep);
+    const uint16_t v = prefix[_mm_crc32_u64(0, head) & (kFastSlots - 1)];
+    if (!v || v == 0xffff) return -1;
+    const uint32_t id = v - 1;
+    return load64(names.img[id]) == head && ep[names.len[id]] == ' '
+               ? int(id) : -1;
+  }
 
   void put(uint32_t h, uint32_t id) {
     uint32_t i = h >> 18;
@@ -263,6 +276,13 @@ struct Local { // one worker's private open-addressing view of the dictionary
           if (other != id && names.hash[other] == h)
             ambiguous[id] = ambiguous[other] = 1;
         }
+      }
+      for (uint32_t id = 0; id < 1842; ++id) {
+        if (names.len[id] < 8) continue;
+        const uint32_t ix = _mm_crc32_u64(0, load64(names.img[id])) & (kFastSlots - 1);
+        uint16_t &v = prefix[ix];
+        if (!v) v = id + 1;
+        else if (v != id + 1) v = 0xffff;
       }
       certified = true;
     }
@@ -403,12 +423,21 @@ struct Job {
     _mm_prefetch(p + 1280, _MM_HINT_T0);
     _mm_prefetch(p + 1344, _MM_HINT_T0);
     const char *q = p + 28;
-    uint64_t m = spaces(q) | uint64_t{spaces(q + 32)} << 32;
-    const uint32_t k1 = __builtin_ctzll(m);
-    m &= m - 1;
-    const uint32_t k2 = m ? __builtin_ctzll(m) : far_space(q);
-    const uint32_t id = local.find(names, q + k1 + 1, k2 - k1 - 1);
-    const char *s = q + k2 + 1;
+    const uint32_t k1 = __builtin_ctz(spaces(q));
+    const char *ep = q + k1 + 1;
+    int fast_id = local.prefix_find(names, ep);
+    uint32_t id;
+    const char *s;
+    if (__builtin_expect(fast_id >= 0, 1)) {
+      id = fast_id;
+      s = ep + names.len[id] + 1;
+    } else {
+      uint64_t m = spaces(q) | uint64_t{spaces(q + 32)} << 32;
+      m &= m - 1;
+      const uint32_t k2 = m ? __builtin_ctzll(m) : far_space(q);
+      id = local.find(names, ep, k2 - k1 - 1);
+      s = q + k2 + 1;
+    }
     const uint32_t error = *s == '5';
     s += 4;
     uint64_t v = load64(s) ^ 0x3030303030303030, lat;
