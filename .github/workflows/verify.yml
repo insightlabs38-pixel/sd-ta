@@ -1,7 +1,7 @@
 name: Track A exactness
 on:
   push:
-    branches: [main]
+    branches: [main, 'research/a-breakthrough-20261101-profile']
   workflow_dispatch:
 jobs:
   verify:
@@ -164,3 +164,6 @@ jobs:
           done
       - name: Summary
         run: cat /tmp/summary.txt
+
+      - name: Research profiling of full input
+        run: SD_PROFILE=1 SD_DATA_DIR=/tmp/a-full SD_OUT_DIR=/tmp/a-out ./solution
