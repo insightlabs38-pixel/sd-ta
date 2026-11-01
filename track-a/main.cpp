@@ -485,6 +485,7 @@ struct Job {
       out = errors ? put(out, uint64_t{errors} * 1000000 / n) : put(out, 0);
       *out++ = '\n';
       row[2] = out - digits;
+      std::memset(out, 0, 96); // readable tail for bounded vector copying
     }
     {
       std::lock_guard<std::mutex> lock(mu);
@@ -517,7 +518,9 @@ struct Job {
         for (uint32_t j = 0; j < 128; j += 32)
           _mm256_storeu_si256((__m256i *)(out + 21 + j), load(names.img[id] + j));
         out += 21 + names.len[id];
-        std::memcpy(out, row + 3, n);
+        // The next row overwrites the excess; the final excess is not written.
+        for (uint32_t j = 0; j < 96; j += 32)
+          _mm256_storeu_si256((__m256i *)(out + j), load(row + 3 + j));
         row += 3 + n;
         out += n;
       }
