@@ -428,8 +428,12 @@ struct Job {
     }
     const uint32_t small = lat < kOverflow ? uint32_t(lat) : kOverflow;
     *(*st.at)++ = (small << 12) | (id | error << 11);
-    if (__builtin_expect(small == kOverflow, 0))
-      ov[st.at - wp].push_back(uint32_t(lat));
+    if (__builtin_expect(small == kOverflow, 0)) {
+      auto &exceptions = ov[st.at - wp];
+      if (__builtin_expect(exceptions.capacity() == 0, 0))
+        exceptions.reserve(128);
+      exceptions.push_back(uint32_t(lat));
+    }
     st.pos = s + 1;
   }
 
