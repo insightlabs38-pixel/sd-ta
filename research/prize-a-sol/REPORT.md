@@ -1,5 +1,22 @@
 # Track A prize architecture evaluation — November 1, 2026
 
+**Measurement correction (November 1):** the organizer's `/out` is a bind mount
+from persistent host tmpfs, and the final parent cgroup peak includes those
+pages after container removal. This report's original disk-backed Docker memory
+comparisons and K projections below are historical diagnostics and are withdrawn
+as estimates of official K. `O_DIRECT`, writeback, and output-eviction findings
+from that filesystem do not transfer to the official harness. The corrected
+Round 2 harness prewarms data before each fresh parent, binds a persistent 8 GiB
+host tmpfs, runs the organizer timer as PID 1, removes the container, then reads
+the parent peak; M uses the maximum across fresh runs.
+
+The integrator's official trial of this exact source passed gates but scored
+**K=48.801309, T=0.017286 s, M=21,168,128 B, S=578, D=1**. It did not beat
+the historical BEST K=49.960098 and was not promoted. Its immediately preceding
+control scored K=45.201982; this illustrates why contemporaneous controls and
+replication matter. The champion remains recoverable and unchanged.
+
+
 The strongest replicated challenger is `prize/a-sol-lean-pipeline`: exact shared dictionary publication, compact numeric completed hours, immediate recycling of scattered runs, and demand-sized latency buffers. Source blob **`1ad533f716e9f898eeb0e174959bfb25cad52e85`**, source commit `1961c14`, **S=578, D=1**. It is qualified for integrator evaluation, not promoted or submitted officially.
 
 Two independent complete CI runs project **K=52.65 and 53.14** from the official BEST K=49.960098. This falls short of the requested 58–60 target. No official-score improvement is claimed. Main and `sd-sm` were preserved.
