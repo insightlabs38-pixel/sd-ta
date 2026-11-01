@@ -213,3 +213,7 @@ jobs:
             done
             echo "AXES_M $label max5=$max"
           done
+
+      - name: Interleaved 25-pair cgroup peak study
+        shell: bash
+        run: python tests/paired_memory.py
