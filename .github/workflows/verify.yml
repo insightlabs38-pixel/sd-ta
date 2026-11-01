@@ -1,7 +1,7 @@
 name: Track A exactness
 on:
   push:
-    branches: [main, 'research/a-breakthrough-20261101-catalog-cert']
+    branches: [main, 'research/a-breakthrough-20261101-catalog-cache']
   workflow_dispatch:
 jobs:
   verify:
@@ -190,5 +190,32 @@ jobs:
                       with open('/tmp/a-out/summary.txt','rb') as f:
                           assert hashlib.sha256(f.read()).hexdigest()==expected
               a,b=[statistics.median(times[name]) for name in ('champion','certificate')]
-              print(f'CERT_THREADS={threads} latest-main={a:.6f}s certificate={b:.6f}s ratio={b/a:.4f}',flush=True)
+              print(f'CACHE_THREADS={threads} latest-main={a:.6f}s certificate={b:.6f}s ratio={b/a:.4f}',flush=True)
+          PY
+
+      - name: Two-stage cache versus certified map matched controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin research/a-breakthrough-20261101-catalog-cert
+          git show FETCH_HEAD:track-a/main.cpp > /tmp/a-catalog-cert.cpp
+          g++ -O3 -march=x86-64-v3 -std=c++20 -DNDEBUG -pthread -static-libstdc++ -static-libgcc -o /tmp/a-catalog-cert /tmp/a-catalog-cert.cpp
+          python - <<'PY'
+          import hashlib,os,random,statistics,subprocess,time
+          expected='495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3'
+          for threads in (1,4,12):
+              env=dict(os.environ,SD_THREADS=str(threads),SD_DATA_DIR='/tmp/a-full',SD_OUT_DIR='/tmp/a-out')
+              cases={'certificate':'/tmp/a-catalog-cert','cached':'./solution'}
+              times={x:[] for x in cases}
+              for j in range(31):
+                  names=list(cases)
+                  random.Random(20261101+threads*83+j).shuffle(names)
+                  for name in names:
+                      t=time.perf_counter()
+                      subprocess.run([cases[name]],env=env,check=True)
+                      times[name].append(time.perf_counter()-t)
+                      with open('/tmp/a-out/summary.txt','rb') as f:
+                          assert hashlib.sha256(f.read()).hexdigest()==expected
+              a,b=(statistics.median(times[k]) for k in cases)
+              print(f'CACHE_VS_CERT_THREADS={threads} certificate={a:.6f}s cached={b:.6f}s ratio={b/a:.4f}',flush=True)
           PY
