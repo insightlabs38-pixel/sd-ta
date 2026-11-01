@@ -226,8 +226,6 @@ struct Local { // one worker's private open-addressing view of the dictionary
   static constexpr uint32_t kSlots = 1 << 14;
   uint16_t slot[kSlots]{}; // id + 1, or 0 when free
   uint32_t synced = 0;
-  struct Hot { uint32_t hash; uint16_t id, len; };
-  Hot hot[128]{}; // per-worker exact-verified L0 identity cache
 
   void put(uint32_t h, uint32_t id) {
     uint32_t i = h >> 18;
@@ -280,13 +278,8 @@ struct Local { // one worker's private open-addressing view of the dictionary
     const uint64_t x = _bzhi_u64(load64(ep), keep),
                    y = _bzhi_u64(load64(ep + std::max(n, 8u) - 8), keep);
     const uint32_t h = _mm_crc32_u64(_mm_crc32_u64(n, x), y);
-    Hot &entry = hot[(h ^ (h >> 9)) & 127];
-    if (entry.len == n && entry.hash == h &&
-        names.same(entry.id, ep, n)) return entry.id;
     const int id = lookup(names, ep, n, h);
-    const uint32_t resolved = id >= 0 ? id : add(names, ep, n, h);
-    entry = {h, uint16_t(resolved), uint16_t(n)};
-    return resolved;
+    return id >= 0 ? id : add(names, ep, n, h);
   }
 };
 
@@ -393,16 +386,9 @@ struct Job {
     const char *s = q + k2 + 1;
     const uint32_t error = *s == '5';
     s += 4;
-    uint64_t v = load64(s) ^ 0x3030303030303030, lat;
-    const uint64_t other = ((v + 0x7676767676767676) | v) & 0x8080808080808080;
-    if (other) {
-      const uint32_t digits = __builtin_ctzll(other) >> 3;
-      lat = digits8(v << (64 - 8 * digits));
-      s += digits;
-    } else {
-      for (lat = digits8(v), s += 8; *s != '\n'; ++s)
-        lat = lat * 10 + (*s - '0');
-    }
+    uint32_t lat;
+    const auto parsed = std::from_chars(s, s + 10, lat);
+    s = parsed.ptr;
     const uint64_t rec = lat | uint64_t{id | error << 11} << 32;
     std::memcpy((*st.at)++, &rec, sizeof(Rec));
     st.pos = s + 1;
