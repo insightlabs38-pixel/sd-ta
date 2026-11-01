@@ -132,7 +132,8 @@ jobs:
           done
           docker build --network=none --pull=false --target build -t sd-r2-codegen track-a
           docker run --rm --network=none --read-only --tmpfs /tmp:rw,size=1g --entrypoint g++ sd-r2-codegen -O3 -march=x86-64-v3 -std=c++20 -DNDEBUG -pthread -S -masm=intel main.cpp -o - > /tmp/r2/candidate.s
-          python tests/r2_compare.py --work /tmp/r2 --organizer /tmp/organizer --baseline /tmp/baseline --official /tmp/official --candidate /tmp/candidate
+          docker run --rm --network=none --read-only --tmpfs /tmp:rw,size=1g --mount type=bind,source=/tmp/base-context/main.cpp,target=/src/control.cpp,readonly --entrypoint g++ sd-r2-codegen -O3 -march=x86-64-v3 -std=c++20 -DNDEBUG -pthread -S -masm=intel control.cpp -o - > /tmp/r2/baseline.s
+          python tests/r2_compare.py --work /tmp/r2 --organizer /tmp/organizer --baseline /tmp/baseline --official /tmp/official --candidate /tmp/candidate --trials 31 --memory-trials 15
       - uses: actions/upload-artifact@v4
         if: always()
         with:
