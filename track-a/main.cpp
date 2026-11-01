@@ -24,7 +24,7 @@ const char *days[] = {"2026-10-30", "2026-10-31", "2026-11-01", "2026-11-02"};
 [[noreturn]] void die(const char *s) { perror(s); _exit(2); }
 int hour(const char *p) {
   return (p[9] + (p[6] & 1)) * 24 + (p[11] - '0') * 10 +
-         (p[12] - '0') - 1218;
+         (p[12] - '0') - 1170;
 }
 struct Span { const char *a, *b; uint8_t h; };
 struct Block { std::vector<Span> spans; };
