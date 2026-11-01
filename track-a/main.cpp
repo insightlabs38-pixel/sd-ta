@@ -493,9 +493,17 @@ struct Job {
         scratch.resize(n + 16);
       multiselect(a, scratch.data(), 0, n, ranks, 3, value);
       std::memcpy(out, label, 21);
-      for (uint32_t i = 0; i < 128; i += 32)
-        _mm256_storeu_si256((__m256i *)(out + 21 + i), load(names.img[id] + i));
-      out += 21 + names.len[id];
+      const uint32_t width = names.len[id];
+      _mm256_storeu_si256((__m256i *)(out + 21), load(names.img[id]));
+      if (width > 32) {
+        _mm256_storeu_si256((__m256i *)(out + 53), load(names.img[id] + 32));
+        if (width > 64) {
+          _mm256_storeu_si256((__m256i *)(out + 85), load(names.img[id] + 64));
+          if (width > 96)
+            _mm256_storeu_si256((__m256i *)(out + 117), load(names.img[id] + 96));
+        }
+      }
+      out += 21 + width;
       out = put(put(put(put(put(out, n), uint32_t(value[0]) ^ 0x80000000),
                         uint32_t(value[1]) ^ 0x80000000),
                     uint32_t(value[2]) ^ 0x80000000),
