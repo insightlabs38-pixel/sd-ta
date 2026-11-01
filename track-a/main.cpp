@@ -230,6 +230,8 @@ struct Local { // one worker's private open-addressing view of the dictionary
   // Once all are published, a unique fingerprint certifies exact identity.
   uint8_t ambiguous[kIds]{};
   bool certified = false;
+  struct Hot { uint64_t first, last; uint32_t len; uint16_t id; };
+  Hot hot[64]{}; // exact, collision-certified signatures only
 
   void put(uint32_t h, uint32_t id) {
     uint32_t i = h >> 18;
@@ -302,9 +304,20 @@ struct Local { // one worker's private open-addressing view of the dictionary
     const uint64_t keep = n < 8 ? n * 8 : 64;
     const uint64_t x = _bzhi_u64(load64(ep), keep),
                    y = _bzhi_u64(load64(ep + std::max(n, 8u) - 8), keep);
+    const uint32_t bucket =
+        ((x * 0x9e3779b185ebca87ULL) ^ (y << 13 | y >> 51) ^
+         (uint64_t{n} * 0xc2b2ae3d27d4eb4fULL)) >> 58;
+    if (certified) {
+      const Hot &e = hot[bucket];
+      if (e.id && e.len == n && e.first == x && e.last == y)
+        return e.id - 1;
+    }
     const uint32_t h = _mm_crc32_u64(_mm_crc32_u64(n, x), y);
-    const int id = lookup(names, ep, n, h);
-    return id >= 0 ? id : add(names, ep, n, h);
+    const int found = lookup(names, ep, n, h);
+    const uint32_t id = found >= 0 ? found : add(names, ep, n, h);
+    if (certified && !ambiguous[id])
+      hot[bucket] = Hot{x, y, n, uint16_t(id + 1)};
+    return id;
   }
 };
 
