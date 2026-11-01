@@ -3,6 +3,7 @@
 // hour is finalized once the finished file prefix is kLag hours past it.
 // A late line that breaks this is detected and the run is repeated exactly.
 #include <algorithm>
+#include <cerrno>
 #include <atomic>
 #include <charconv>
 #include <condition_variable>
@@ -290,11 +291,108 @@ __attribute__((always_inline)) char *put(char *out, uint32_t v) {
   return out + 8 - skip;
 }
 
+// One consumer performs aligned direct writes while the producer fills the
+// other buffer. Atomic slot states publish bytes and protect reuse: 0/1/2 are
+// free/ready/stop. Completion and join precede the final truncation.
+class Output {
+  static constexpr size_t kBatch = 512 << 10;
+  struct Slot {
+    char *bytes = nullptr;
+    size_t length = 0;
+    uint64_t offset = 0;
+    std::atomic<int> state{0};
+  };
+  Slot slots[2];
+  int fd;
+  bool direct = false;
+  std::thread consumer;
+  uint32_t current = 0;
+  uint64_t logical = 0, physical = 0, previous = 0, discard = 0;
+  size_t used = 0;
+  void write_at(const char *bytes, size_t length, uint64_t offset) {
+    while (length) {
+      const ssize_t n = pwrite(fd, bytes, length, offset);
+      if (n < 0 && errno == EINTR) continue;
+      if (n < 0 && (errno == EINVAL || errno == EOPNOTSUPP)) {
+        const int flags = fcntl(fd, F_GETFL);
+        if (flags < 0 || fcntl(fd, F_SETFL, flags & ~O_DIRECT)) fail("buffered fallback");
+        continue;
+      }
+      if (n <= 0) fail("write summary");
+      bytes += n; length -= n; offset += n;
+    }
+  }
+  void wait_free(Slot &slot) {
+    while (slot.state.load(std::memory_order_acquire) != 0) slot.state.wait(1);
+  }
+  void consume() {
+    for (uint32_t index = 0;; index ^= 1) {
+      Slot &slot = slots[index];
+      int state;
+      while ((state = slot.state.load(std::memory_order_acquire)) == 0) slot.state.wait(0);
+      if (state == 2) return;
+      write_at(slot.bytes, slot.length, slot.offset);
+      slot.state.store(0, std::memory_order_release);
+      slot.state.notify_one();
+    }
+  }
+  void submit(size_t length) {
+    Slot &slot = slots[current];
+    slot.length = length; slot.offset = physical;
+    physical += length;
+    slot.state.store(1, std::memory_order_release);
+    slot.state.notify_one();
+    current ^= 1; used = 0;
+  }
+public:
+  explicit Output(int descriptor) : fd(descriptor) {
+    const int flags = fcntl(fd, F_GETFL);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_DIRECT)) return;
+    for (Slot &slot : slots)
+      if (posix_memalign(reinterpret_cast<void **>(&slot.bytes), 4096, kBatch))
+        fail("output buffer");
+    direct = true;
+    consumer = std::thread([this] { consume(); });
+  }
+  void append(const char *bytes, size_t length) {
+    if (!direct) {
+      write_at(bytes, length, logical);
+      sync_file_range(fd, logical, length, SYNC_FILE_RANGE_WRITE);
+      if (discard) posix_fadvise(fd, 0, discard, POSIX_FADV_DONTNEED);
+      discard = previous; previous = logical; logical += length;
+      return;
+    }
+    logical += length;
+    while (length) {
+      Slot &slot = slots[current];
+      wait_free(slot);
+      const size_t n = std::min(length, kBatch - used);
+      std::memcpy(slot.bytes + used, bytes, n);
+      used += n; bytes += n; length -= n;
+      if (used == kBatch) submit(used);
+    }
+  }
+  void finish() {
+    if (direct) {
+      if (used) {
+        const size_t length = (used + 4095) & ~size_t(4095);
+        std::memset(slots[current].bytes + used, 0, length - used);
+        submit(length);
+      }
+      for (Slot &slot : slots) wait_free(slot);
+      slots[current].state.store(2, std::memory_order_release);
+      slots[current].state.notify_one();
+      consumer.join();
+    }
+    if (ftruncate(fd, logical)) fail("size summary");
+  }
+};
+
 struct Job {
   const char *base;
   size_t size;
   uint32_t lag, nblocks, threads;
-  int fd;
+  Output output;
   Names names;
   std::mutex mu, out_mu;
   std::condition_variable cv;
@@ -304,7 +402,6 @@ struct Job {
            next_hour = 0;
   bool bad = false; // a line arrived after its hour was finalized
   Part parts[kHours];
-  off_t end[kHours + 1]{}; // output offset after each hour
   uint32_t written = 0;    // hours written so far
   bool writing = false;
   std::atomic<size_t> zapped{0}; // 4 MiB steps of the mapping released
@@ -315,7 +412,7 @@ struct Job {
 
   Job(const char *b, size_t n, uint32_t l, int f, uint32_t t)
       : base(b), size(n), lag(l), nblocks((n + kBlock - 1) / kBlock),
-        threads(t), fd(f), top(nblocks, -1) {}
+        threads(t), output(f), top(nblocks, -1) {}
   ~Job() {
     for (Rec *r : runbufs)
       std::free(r);
@@ -512,19 +609,8 @@ struct Job {
         *out++ = '\n';
       }
       const size_t length = out - text.get();
-      for (size_t done = 0; done < length;) {
-        const ssize_t w =
-            write(fd, text.get() + done, length - done);
-        if (w <= 0)
-          fail("write summary");
-        done += w;
-      }
-      end[written + 1] = end[written] + length;
-      if (written + 1 == kHours && ftruncate(fd, end[kHours]))
-        fail("size summary");
-      sync_file_range(fd, end[written], length, SYNC_FILE_RANGE_WRITE);
-      if (written >= kKeep)
-        posix_fadvise(fd, 0, end[written - kKeep + 1], POSIX_FADV_DONTNEED);
+      output.append(text.get(), length);
+      if (written + 1 == kHours) output.finish();
       {
         std::lock_guard<std::mutex> pool_lock(mu);
         resultbufs.push_back(std::move(part.first));
