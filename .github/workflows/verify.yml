@@ -1,7 +1,7 @@
 name: Track A exactness
 on:
   push:
-    branches: [main, 'research/a-breakthrough-20261101-word4-sidecar']
+    branches: [main, 'research/a-breakthrough-20261101-word4-sidecar-axes']
   workflow_dispatch:
 jobs:
   verify:
@@ -192,8 +192,36 @@ jobs:
                       with open('/tmp/a-out/summary.txt','rb') as f:
                           assert hashlib.sha256(f.read()).hexdigest()==expected
               a,b=[statistics.median(times[name]) for name in ('champion','certificate')]
-              print(f'SIDECAR_THREADS={threads} latest-main={a:.6f}s certificate={b:.6f}s ratio={b/a:.4f}',flush=True)
+              print(f'SIDECAR_AXES_THREADS={threads} latest-main={a:.6f}s certificate={b:.6f}s ratio={b/a:.4f}',flush=True)
           PY
+
+
+      - name: Paired official-style certificate versus sidecar memory peaks
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/a-certificate-image /tmp/a-main-axes
+          git fetch --depth=1 origin research/a-breakthrough-20261101-catalog-cert
+          git show FETCH_HEAD:track-a/main.cpp > /tmp/a-certificate-image/main.cpp
+          cp track-a/Dockerfile /tmp/a-certificate-image/Dockerfile
+          docker build --network=none --pull=false -t sd-certificate-axes -f /tmp/a-certificate-image/Dockerfile /tmp/a-certificate-image
+          git fetch --depth=1 origin main
+          git show FETCH_HEAD:track-a/main.cpp > /tmp/a-main-axes/main.cpp
+          cp track-a/Dockerfile /tmp/a-main-axes/Dockerfile
+          docker build --network=none --pull=false -t sd-main-axes -f /tmp/a-main-axes/Dockerfile /tmp/a-main-axes
+          for trial in 1 2 3 4 5 6 7 8 9 10; do
+            if ((trial % 2)); then order="main certificate sidecar"; else order="sidecar certificate main"; fi
+            for label in $order; do
+              image=sd-main-axes
+              if [ "$label" = certificate ]; then image=sd-certificate-axes; fi
+              if [ "$label" = sidecar ]; then image=sd-track-a; fi
+              peak=$(docker run --rm --network=none --read-only --memory=8g --memory-swap=8g --pids-limit=512 --tmpfs /tmp:rw,size=1g \
+                --mount type=bind,source=/tmp/a-full,target=/data,readonly \
+                --mount type=bind,source=/tmp/a-container-out,target=/out \
+                --entrypoint /bin/sh "$image" -c '/solution && cat /sys/fs/cgroup/memory.peak')
+              echo "MATCHED_M trial=$trial label=$label bytes=$peak"
+            done
+          done
 
       - name: Two-stage cache versus certified map matched controls
         shell: bash
@@ -219,5 +247,5 @@ jobs:
                       with open('/tmp/a-out/summary.txt','rb') as f:
                           assert hashlib.sha256(f.read()).hexdigest()==expected
               a,b=(statistics.median(times[k]) for k in cases)
-              print(f'SIDECAR_VS_CERT_THREADS={threads} certificate={a:.6f}s cached={b:.6f}s ratio={b/a:.4f}',flush=True)
+              print(f'SIDECAR_AXES_VS_CERT_THREADS={threads} certificate={a:.6f}s cached={b:.6f}s ratio={b/a:.4f}',flush=True)
           PY
