@@ -1,0 +1,96 @@
+name: Track A offline PGO qualification
+on:
+  push:
+    branches: [a/pgo-training-20261101]
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Prepare public reference data
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/hackathon-raptors/speed-demon-2026.git /tmp/organizer
+          for scale in tiny sample full; do
+            mkdir -p "/tmp/a-$scale"
+            python /tmp/organizer/generators/a_ingest.py --seed 1 --scale "$scale" --out "/tmp/a-$scale"
+          done
+          mkdir -p /tmp/a-seed2 /tmp/a-ref /tmp/a-out
+          python /tmp/organizer/generators/a_ingest.py --seed 2 --scale sample --out /tmp/a-seed2
+          python /tmp/organizer/reference/a_ingest.py --data /tmp/a-seed2 --out /tmp/a-ref
+          chmod 777 /tmp/a-out
+      - name: Check allowlist and build both exact-source images offline
+        shell: bash
+        run: |
+          set -euo pipefail
+          python /tmp/organizer/harness/dockerfile_check.py track-a/Dockerfile /tmp/organizer/harness/allowlist.json
+          docker pull python:3.13-slim@sha256:d98cc29d3266e535dd9da1099688d9cb3ca4753813571e071763d17725460962
+          docker pull gcc:15@sha256:eb5e64286ad47187b32bda75c6b6916166ecb41da56559b8b09e0001748d2cce
+          docker pull debian:13-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
+          docker build --network=none --pull=false -t sd-track-a-pgo -f track-a/Dockerfile track-a
+          test "$(docker image inspect sd-track-a-pgo --format '{{.Size}}')" -lt 2000000000
+          mkdir -p /tmp/a-champion
+          git show 4aa987898640222750cd5ee68500c3f3b9967375:track-a/main.cpp > /tmp/a-champion/main.cpp
+          git show 4aa987898640222750cd5ee68500c3f3b9967375:track-a/Dockerfile > /tmp/a-champion/Dockerfile
+          docker build --network=none --pull=false -t sd-track-a-champion -f /tmp/a-champion/Dockerfile /tmp/a-champion
+      - name: Check official hashes and independent seed in restricted Docker
+        shell: bash
+        run: |
+          set -euo pipefail
+          for scale in tiny sample full; do
+            docker run --rm --network=none --read-only --memory=8g --memory-swap=8g --pids-limit=512 --tmpfs /tmp:rw,size=1g \
+              --mount type=bind,source="/tmp/a-$scale",target=/data,readonly \
+              --mount type=bind,source=/tmp/a-out,target=/out sd-track-a-pgo
+            case "$scale" in
+              tiny) expected=c24fa507c963eaeac9224fd8435019b4f4e8c002ece7e32f316681a3957eb92f ;;
+              sample) expected=ca6311bbeb536fa55d85265bf6fd3d24cc9586f13de1ac73bd2a23ac3893aac3 ;;
+              full) expected=495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3 ;;
+            esac
+            echo "$expected  /tmp/a-out/summary.txt" | sha256sum -c -
+          done
+          docker run --rm --network=none --read-only --memory=8g --memory-swap=8g --pids-limit=512 --tmpfs /tmp:rw,size=1g \
+            --mount type=bind,source=/tmp/a-seed2,target=/data,readonly \
+            --mount type=bind,source=/tmp/a-out,target=/out sd-track-a-pgo
+          cmp /tmp/a-out/summary.txt /tmp/a-ref/summary.txt
+      - name: Matched complete-program PGO versus champion timing
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/a-binaries
+          for label in pgo champion; do
+            cid=$(docker create "sd-track-a-$label")
+            docker cp "$cid:/solution" "/tmp/a-binaries/$label"
+            docker rm "$cid"
+          done
+          chmod 755 /tmp/a-binaries/*
+          docker run --rm --network=none --read-only --memory=8g --memory-swap=8g --pids-limit=512 --tmpfs /tmp:rw,size=1g \
+            --mount type=bind,source=/tmp/a-full,target=/data,readonly \
+            --mount type=bind,source=/tmp/a-out,target=/out \
+            --mount type=bind,source=/tmp/a-binaries,target=/bench,readonly \
+            --entrypoint /bin/sh sd-track-a-pgo -c '
+              i=0
+              while [ "$i" -lt 31 ]; do
+                for label in champion pgo; do
+                  start=$(date +%s%N)
+                  /bench/$label
+                  stop=$(date +%s%N)
+                  echo "$label $((stop-start))"
+                  echo "495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3  /out/summary.txt" | sha256sum -c - >/dev/null
+                done
+                i=$((i+1))
+              done
+            ' | tee /tmp/a-times.txt
+          python - <<'PY'
+          import statistics
+          d = {'champion': [], 'pgo': []}
+          for line in open('/tmp/a-times.txt'):
+              k, v = line.split()
+              d[k].append(int(v) / 1e9)
+          a, b = statistics.median(d['champion']), statistics.median(d['pgo'])
+          print(f"Matched 31-run complete-program median: champion={a:.6f}s PGO={b:.6f}s ratio={b/a:.4f}")
+          PY
