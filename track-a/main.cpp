@@ -34,7 +34,7 @@ using Run = std::pair<Rec *, uint32_t>;
 // A completed hour waits as exact numeric results, not expanded output text.
 struct Result {
   uint32_t count, p50, p95, p99, errors;
-  uint16_t id;
+  uint32_t endpoint_ppm; // low 11 bits: endpoint; high 20 bits: exact error ppm
 };
 using Part = std::pair<std::unique_ptr<Result[]>, uint32_t>;
 
@@ -478,7 +478,8 @@ struct Job {
       multiselect(a, scratch.data(), 0, n, ranks, 3, value);
       result[i] = {n, uint32_t(value[0]) ^ 0x80000000,
                    uint32_t(value[1]) ^ 0x80000000,
-                   uint32_t(value[2]) ^ 0x80000000, errors, id};
+                   uint32_t(value[2]) ^ 0x80000000, errors,
+                   id | uint32_t(errors ? uint64_t{errors} * 1000000 / n : 0) << 11};
     }
     {
       std::lock_guard<std::mutex> lock(mu);
@@ -503,12 +504,13 @@ struct Job {
                     kDays[(written + 18) / 24], (written + 18) % 24);
       for (uint32_t i = 0; i < part.second; ++i) {
         const Result &r = part.first[i];
+        const uint32_t id = r.endpoint_ppm % kIds;
         std::memcpy(out, label, 21);
         for (uint32_t j = 0; j < 128; j += 32)
-          _mm256_storeu_si256((__m256i *)(out + 21 + j), load(names.img[r.id] + j));
-        out += 21 + names.len[r.id];
+          _mm256_storeu_si256((__m256i *)(out + 21 + j), load(names.img[id] + j));
+        out += 21 + names.len[id];
         out = put(put(put(put(put(out, r.count), r.p50), r.p95), r.p99), r.errors);
-        out = put(out, uint64_t{r.errors} * 1000000 / r.count);
+        out = put(out, r.endpoint_ppm >> 11);
         *out++ = '\n';
       }
       const size_t length = out - text.get();
