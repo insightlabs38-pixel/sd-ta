@@ -1,8 +1,6 @@
-// Track A: per-hour, per-endpoint request counts, p50/p95/p99 and 5xx rates.
-// The log is nearly time-ordered: blocks are parsed into per-hour runs and an
-// hour is finalized once the finished file prefix is kLag hours past it.
-// A late line that breaks this is detected and the run is repeated exactly.
+// Track A: exact timestamp spans, independent hour owners and ordered output.
 #include <algorithm>
+#include <barrier>
 #include <atomic>
 #include <charconv>
 #include <condition_variable>
@@ -21,16 +19,16 @@
 
 namespace {
 constexpr uint32_t kHours = 72, kIds = 2048, kBlock = 256 << 10, kStreams = 4;
-constexpr uint32_t kLag = 2, kNever = 1000, kKeep = 2;
-constexpr uint32_t kMaxLine = 178, kRunCap = kBlock / 40 + 16, kPartCap = kIds * 256;
+constexpr uint32_t kKeep = 2;
+constexpr uint32_t kMaxLine = 178, kPartCap = kIds * 256;
 const char *const kDays[] = {"2026-10-30", "2026-10-31", "2026-11-01",
                              "2026-11-02"};
 
-struct __attribute__((packed)) Rec {
-  uint32_t lat;
-  uint16_t tag;
-}; // tag: id | 5xx << 11
-using Run = std::pair<Rec *, uint32_t>;
+struct Span { const char *first, *last; };
+struct Worker {
+  std::vector<int32_t> latency[kIds];
+  uint32_t errors[kIds]{};
+};
 // A completed hour waits as exact numeric results, not expanded output text.
 struct Result {
   uint32_t count, p50, p95, p99, errors;
@@ -264,11 +262,7 @@ struct Names {
 };
 
 // Where a stream appends: the hour of its previous line is remembered.
-struct Stream {
-  const char *pos, *stop;
-  uint64_t date = 0; // bytes 5..12 of the previous line
-  Rec **at = nullptr;
-};
+struct Stream { const char *pos, *stop; };
 
 // The eight decimal digits of v < 10^8 as bytes 0..9, most significant first.
 uint64_t digits_of(uint32_t v) {
@@ -293,69 +287,70 @@ __attribute__((always_inline)) char *put(char *out, uint32_t v) {
 struct Job {
   const char *base;
   size_t size;
-  uint32_t lag, nblocks, threads;
+  uint32_t threads, nblocks;
   int fd;
   Names names;
   std::mutex mu, out_mu;
-  std::condition_variable cv;
-  std::vector<Run> runs[kHours]; // per hour, from the registered blocks
-  std::vector<int> top; // per block: its last hour, or -1 until registered
-  uint32_t next_block = 0, watermark = 0, prefix_max = 0, registered = 0,
-           next_hour = 0;
-  bool bad = false; // a line arrived after its hour was finalized
+  std::barrier<> phase;
+  std::atomic<uint32_t> next_block{0}, next_hour{0};
+  std::atomic<size_t> zapped{0};
+  std::vector<Span> spans[kHours];
   Part parts[kHours];
-  off_t end[kHours + 1]{}; // output offset after each hour
-  uint32_t written = 0;    // hours written so far
+  off_t end[kHours + 1]{};
+  uint32_t written = 0;
   bool writing = false;
-  std::atomic<size_t> zapped{0}; // 4 MiB steps of the mapping released
-  std::vector<Rec *> runbufs; // free buffers, guarded by mu
-  std::vector<std::vector<int32_t>> latbufs;
   std::vector<std::unique_ptr<Result[]>> resultbufs;
   std::unique_ptr<char[]> text = std::make_unique<char[]>(kPartCap + 256);
-
-  Job(const char *b, size_t n, uint32_t l, int f, uint32_t t)
-      : base(b), size(n), lag(l), nblocks((n + kBlock - 1) / kBlock),
-        threads(t), fd(f), top(nblocks, -1) {}
-  ~Job() {
-    for (Rec *r : runbufs)
-      std::free(r);
-  }
-
+  std::thread pool[16];
+  Job(const char *b, size_t n, int f, uint32_t t)
+      : base(b), size(n), threads(t), nblocks((n + (4 << 20) - 1) / (4 << 20)),
+        fd(f), phase(t) {}
   template <class T> T take(std::vector<T> &pool) {
     std::lock_guard<std::mutex> lock(mu);
-    if (pool.empty())
-      return T();
-    T t = std::move(pool.back());
-    pool.pop_back();
-    return t;
+    if (pool.empty()) return T();
+    T value = std::move(pool.back()); pool.pop_back();
+    return value;
   }
   static const char *next_line(const char *p) {
-    while (p[-1] != '\n')
-      ++p;
+    while (p[-1] != '\n') ++p;
     return p;
   }
   const char *align(uint32_t block) const {
-    return block ? next_line(base +
-                             std::min<size_t>(size_t{block} * kBlock, size))
-                 : base;
+    return block ? next_line(base + std::min<size_t>(size_t(block) * (4 << 20), size)) : base;
   }
-
-  // Parses one line of the stream; 256 readable bytes must follow it.
-  __attribute__((always_inline)) void line(Stream &st,
-                                           Rec *(&wp)[kHours],
-                                           Rec *(&bp)[kHours]) {
-    const char *p = st.pos;
-    if (const uint64_t date = load64(p + 5); date != st.date) {
-      st.date = date;
-      st.at = wp + (p[9] + (p[6] & 1)) * 24 + p[11] * 10 + p[12] - 1698;
-      if (!*st.at) {
-        Rec *r = take(runbufs);
-        *st.at = bp[st.at - wp] =
-            r ? r
-              : static_cast<Rec *>(
-                    std::malloc(kRunCap * sizeof(Rec) + sizeof(uint64_t)));
+  static uint32_t hour(const char *p) {
+    return (p[9] + (p[6] & 1)) * 24 + p[11] * 10 + p[12] - 1698;
+  }
+  // SIMD newline classification creates maximal same-hour spans. Every line's
+  // timestamp is checked, so arbitrary interleaving needs no replay assumption.
+  void index() {
+    std::vector<Span> local[kHours];
+    for (uint32_t block; (block = next_block++) < nblocks;) {
+      const char *first = align(block), *stop = align(block + 1);
+      if (first == stop) continue;
+      const char *run = first;
+      uint32_t h = hour(first);
+      for (const char *p = first; p < stop; p += 32) {
+        uint32_t mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(load(p), _mm256_set1_epi8('\n')));
+        if (stop - p < 32) mask = _bzhi_u32(mask, stop - p);
+        while (mask) {
+          const char *next = p + __builtin_ctz(mask) + 1;
+          mask &= mask - 1;
+          if (next < stop && hour(next) != h) {
+            local[h].push_back({run, next});
+            run = next; h = hour(next);
+          }
+        }
       }
+      local[h].push_back({run, stop});
     }
+    std::lock_guard<std::mutex> lock(mu);
+    for (uint32_t h = 0; h < kHours; ++h)
+      spans[h].insert(spans[h].end(), local[h].begin(), local[h].end());
+  }
+  // A span's hour was checked by the exact indexing pass.
+  __attribute__((always_inline)) void line(Worker &worker, Stream &st) {
+    const char *p = st.pos;
     _mm_prefetch(p + 1280, _MM_HINT_T0);
     _mm_prefetch(p + 1344, _MM_HINT_T0);
     const char *q = p + 28;
@@ -377,15 +372,14 @@ struct Job {
       for (lat = digits8(v), s += 8; *s != '\n'; ++s)
         lat = lat * 10 + (*s - '0');
     }
-    const uint64_t rec = lat | uint64_t{id | error << 11} << 32;
-    std::memcpy((*st.at)++, &rec, sizeof(Rec));
+    worker.latency[id].push_back(uint32_t(lat) ^ 0x80000000);
+    worker.errors[id] += error;
     st.pos = s + 1;
   }
 
-  void parse(uint32_t block) {
-    Rec *wp[kHours]{}, *bp[kHours]{};
+  void parse(Worker &worker, Span span) {
     Stream st[kStreams]; // interleaved streams overlap their latencies
-    const char *p = align(block), *end = align(block + 1);
+    const char *p = span.first, *end = span.last;
     for (uint32_t i = 0; i < kStreams; ++i) {
       st[i].pos = i ? next_line(p + (end - p) * i / kStreams) : p;
       st[i].stop = i + 1 < kStreams ? nullptr : end;
@@ -400,93 +394,44 @@ struct Job {
       for (rounds = room / kMaxLine; rounds--;) {
 #pragma GCC unroll 4
         for (Stream &x : st)
-          line(x, wp, bp);
+          line(worker, x);
       }
       rounds = room / kMaxLine;
     }
     for (Stream &x : st)
       while (x.pos < x.stop)
-        line(x, wp, bp);
+        line(worker, x);
 
-    std::lock_guard<std::mutex> lock(mu);
-    int last = 0;
-    for (uint32_t h = 0; h < kHours; ++h) {
-      if (!bp[h])
-        continue;
-      last = h;
-      if (h < next_hour) {
-        bad = true;
-        runbufs.push_back(bp[h]);
-      } else
-        runs[h].push_back({bp[h], static_cast<uint32_t>(wp[h] - bp[h])});
-    }
-    top[block] = last;
-    for (++registered; watermark < nblocks && top[watermark] >= 0; ++watermark)
-      prefix_max = std::max<int>(prefix_max, top[watermark]);
-    cv.notify_all();
   }
-
-  void finalize(uint32_t hour) {
-    std::vector<Run> mine;
+  void finalize(uint32_t h, Worker &worker) {
+    for (Span span : spans[h]) parse(worker, span);
     std::vector<uint16_t> order;
     {
-      std::lock_guard<std::mutex> lock(mu);
-      mine.swap(runs[hour]);
-      std::lock_guard<SpinLock> names_lock(names.mu);
+      std::lock_guard<SpinLock> lock(names.mu);
       order = names.sorted;
     }
-    uint32_t count[2 * kIds] = {}, pos[kIds],
-                       total = 0; // by tag: ids, then their 5xx
-    for (const auto &[rec, n] : mine)
-      for (uint32_t i = 0; i < n; ++i)
-        ++count[rec[i].tag];
-    uint16_t live[kIds]; // the endpoints seen in this hour, in output order
-    uint32_t seen = 0;
-    for (const uint16_t id : order) {
-      const uint32_t n = count[id] + count[id + kIds];
-      pos[id] = total;
-      total += n;
-      live[seen] = id;
-      seen += n != 0;
-    }
-    std::vector<int32_t> lat = take(latbufs);
-    lat.resize(total + 16);
-    for (const auto &[rec, n] : mine)
-      for (uint32_t i = 0; i < n; ++i)
-        lat[pos[rec[i].tag % kIds]++] = rec[i].lat ^ 0x80000000;
-
-    // Scatter consumes the runs. Recycle them before percentile selection and
-    // formatting so that parsing need not allocate another generation.
-    {
-      std::lock_guard<std::mutex> lock(mu);
-      for (const auto &[rec, n] : mine)
-        runbufs.push_back(rec);
-    }
-    static thread_local std::vector<int32_t> scratch;
     auto result = take(resultbufs);
-    if (!result)
-      result = std::make_unique<Result[]>(kIds);
-    for (uint32_t i = 0; i < seen; ++i) {
-      const uint16_t id = live[i];
-      const uint32_t errors = count[id + kIds], n = count[id] + errors;
-      int32_t *const a = lat.data() + pos[id] - n;
-      const uint32_t ranks[3] = {(50 * n + 99) / 100 - 1, (95 * n + 99) / 100 - 1,
+    if (!result) result = std::make_unique<Result[]>(kIds);
+    static thread_local std::vector<int32_t> scratch;
+    uint32_t seen = 0;
+    for (uint16_t id : order) {
+      auto &values = worker.latency[id];
+      const uint32_t n = values.size();
+      if (!n) continue;
+      values.resize(n + 16);
+      if (scratch.size() < n + 16) scratch.resize(n + 16);
+      const uint32_t ranks[3] = {(50 * n + 99) / 100 - 1,
+                                 (95 * n + 99) / 100 - 1,
                                  (99 * n + 99) / 100 - 1};
       int32_t value[3];
-      if (scratch.size() < n + 16)
-        scratch.resize(n + 16);
-      multiselect(a, scratch.data(), 0, n, ranks, 3, value);
-      result[i] = {n, uint32_t(value[0]) ^ 0x80000000,
-                   uint32_t(value[1]) ^ 0x80000000,
-                   uint32_t(value[2]) ^ 0x80000000, errors, id};
+      multiselect(values.data(), scratch.data(), 0, n, ranks, 3, value);
+      result[seen++] = {n, uint32_t(value[0]) ^ 0x80000000,
+                        uint32_t(value[1]) ^ 0x80000000,
+                        uint32_t(value[2]) ^ 0x80000000, worker.errors[id], id};
+      values.clear(); worker.errors[id] = 0;
     }
-    {
-      std::lock_guard<std::mutex> lock(mu);
-      latbufs.push_back(std::move(lat));
-    }
-    emit(hour, {std::move(result), seen});
+    emit(h, {std::move(result), seen});
   }
-
   // Whoever completes an hour writes all hours that are ready in order (a
   // thread that finds a writer active just leaves its part), starts their
   // writeback and drops older cached output pages (best effort).
@@ -534,58 +479,24 @@ struct Job {
     writing = false;
   }
 
-  bool claimable() const {
-    return next_hour < kHours &&
-           (registered == nblocks || next_hour + lag <= prefix_max);
+  void work() {
+    index();
+    phase.arrive_and_wait();
+    Worker &worker = *new Worker;
+    for (uint32_t h; (h = next_hour++) < kHours;) finalize(h, worker);
+    phase.arrive_and_wait(); // no worker reads the mapping after this point
+    constexpr size_t step = 4 << 20;
+    for (size_t at; (at = zapped++ * step) < size;)
+      madvise(const_cast<char *>(base) + at, std::min(step, size - at), MADV_DONTNEED);
   }
-
-  // Finalizes hours once they are safe and otherwise parses blocks, but never
-  // more than two per worker past the oldest unfinished one.
-  void work(uint32_t index) {
-    std::unique_lock<std::mutex> lock(mu);
-    for (;;) {
-      if (claimable()) {
-        const uint32_t hour = next_hour++;
-        cv.notify_all();
-        lock.unlock();
-        finalize(hour);
-        lock.lock();
-      } else if (next_block < nblocks && next_block < watermark + 2 * threads) {
-        const uint32_t block = next_block++;
-        lock.unlock();
-        parse(block);
-        lock.lock();
-      } else if (next_hour >= kHours) {
-        lock.unlock(); // drop the file mapping in shared 4 MiB steps so that
-                       // exit is cheaper
-        constexpr size_t kStep = 4 << 20;
-        for (size_t at; (at = zapped++ * kStep) < size;)
-          madvise(const_cast<char *>(base) + at, std::min(kStep, size - at),
-                  MADV_DONTNEED);
-        return;
-      } else {
-        cv.wait(lock);
-      }
-    }
-  }
-  std::thread pool[16]; // worker i is started by worker (i - 1) / 2
-  std::atomic<uint32_t> started{1};
-  // Workers start their children before working, so that a dozen threads are up
-  // after a few thread creations instead of eleven.
   void start(uint32_t i) {
-    for (uint32_t c = 2 * i + 1; c <= 2 * i + 2 && c < threads; ++c) {
+    for (uint32_t c = 2 * i + 1; c <= 2 * i + 2 && c < threads; ++c)
       pool[c] = std::thread([this, c] { start(c); });
-      started.fetch_add(1, std::memory_order_release);
-    }
-    work(i);
+    work();
   }
-  bool run() {
+  void run() {
     start(0);
-    while (started.load(std::memory_order_acquire) < threads)
-      std::this_thread::yield();
-    for (uint32_t i = 1; i < threads; ++i)
-      pool[i].join();
-    return !bad;
+    for (uint32_t i = 1; i < threads; ++i) pool[i].join();
   }
 };
 } // namespace
@@ -613,10 +524,6 @@ int main() {
   cpu_set_t cpus{};
   sched_getaffinity(0, sizeof cpus, &cpus);
   const uint32_t threads = forced ? std::atoi(forced) : std::min(16, CPU_COUNT(&cpus));
-  if (!(new Job(map, bytes, kLag, fd, threads))->run()) {
-    if (ftruncate(fd, 0) || lseek(fd, 0, SEEK_SET))
-      fail("rewind summary");
-    (new Job(map, bytes, kNever, fd, threads))->run();
-  }
+  (new Job(map, bytes, fd, threads))->run();
   _exit(0); // the kernel reclaims everything faster than free() does
 }
