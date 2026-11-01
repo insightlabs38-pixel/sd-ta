@@ -65,126 +65,6 @@ uint64_t digits8(uint64_t v) {
   return (r & 0xffffffff) * 10000 + (r >> 32);
 }
 
-// Lane permutations that compress the lanes of an 8-bit mask to the bottom
-// (kLow) or, for the lanes outside the mask, to the top (kHigh) of a vector.
-struct Lanes {
-  uint8_t low[256][8]{}, high[256][8]{};
-  constexpr Lanes() {
-    for (int m = 0; m < 256; ++m)
-      for (int lane = 0, in = 0, out = 0; lane < 8; ++lane)
-        if (m >> lane & 1)
-          low[m][in++] = lane;
-        else
-          high[m][__builtin_popcount(m) + out++] = lane;
-  }
-};
-constexpr Lanes kLanes;
-
-// Copies src[lo, hi) to dst so that the values below pivot come first; returns
-// how many there are. Values are int32 (latencies with the sign bit flipped).
-uint32_t split(const int32_t *src, int32_t *dst, uint32_t lo, uint32_t hi,
-               int32_t pivot) {
-  const __m256i bound = _mm256_set1_epi32(pivot);
-  uint32_t i = lo, l = lo, r = hi;
-  for (; hi - i >= 16; i += 8) {
-    const __m256i v = load(src + i);
-    const uint32_t m = _mm256_movemask_ps(
-        _mm256_castsi256_ps(_mm256_cmpgt_epi32(bound, v)));
-    auto lanes = [&](const uint8_t *idx) {
-      return _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i *)idx));
-    };
-    _mm256_storeu_si256((__m256i *)(dst + l),
-                        _mm256_permutevar8x32_epi32(v, lanes(kLanes.low[m])));
-    _mm256_storeu_si256((__m256i *)(dst + r - 8),
-                        _mm256_permutevar8x32_epi32(v, lanes(kLanes.high[m])));
-    l += __builtin_popcount(m);
-    r -= 8 - __builtin_popcount(m);
-  }
-  for (; i < hi; ++i) {
-    const int32_t v = src[i];
-    dst[l] = dst[r - 1] = v;
-    l += v < pivot;
-    r -= v >= pivot;
-  }
-  return l - lo;
-}
-
-// Sorts the first n <= 16 values of a (plus 16 readable slots) into out[0, 16)
-// with a bitonic network on two vectors; unused lanes sort to the end.
-template <int M> __m256i step(__m256i v, __m256i other) {
-  return _mm256_blend_epi32(_mm256_min_epi32(v, other),
-                            _mm256_max_epi32(v, other), M);
-}
-__m256i sort8(__m256i v) {
-  const __m256i flip = _mm256_setr_epi32(7, 6, 5, 4, 3, 2, 1, 0);
-  v = step<0xAA>(v, _mm256_shuffle_epi32(v, 0xB1));
-  v = step<0xCC>(v, _mm256_shuffle_epi32(v, 0x1B));
-  v = step<0xAA>(v, _mm256_shuffle_epi32(v, 0xB1));
-  v = step<0xF0>(v, _mm256_permutevar8x32_epi32(v, flip));
-  v = step<0xCC>(v, _mm256_shuffle_epi32(v, 0x4E));
-  return step<0xAA>(v, _mm256_shuffle_epi32(v, 0xB1));
-}
-__m256i merge8(__m256i v) { // v is a bitonic sequence
-  v = step<0xF0>(v, _mm256_permute2x128_si256(v, v, 1));
-  v = step<0xCC>(v, _mm256_shuffle_epi32(v, 0x4E));
-  return step<0xAA>(v, _mm256_shuffle_epi32(v, 0xB1));
-}
-void sort16(const int32_t *a, uint32_t n, int32_t *out) {
-  const __m256i iota = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7),
-                big = _mm256_set1_epi32(INT32_MAX), count = _mm256_set1_epi32(n);
-  __m256i x = _mm256_blendv_epi8(big, load(a), _mm256_cmpgt_epi32(count, iota)),
-          y = _mm256_blendv_epi8(
-              big, load(a + 8),
-              _mm256_cmpgt_epi32(count, _mm256_add_epi32(iota, _mm256_set1_epi32(8))));
-  x = sort8(x);
-  y = _mm256_permutevar8x32_epi32(sort8(y), _mm256_setr_epi32(7, 6, 5, 4, 3, 2, 1, 0));
-  _mm256_storeu_si256((__m256i *)out, merge8(_mm256_min_epi32(x, y)));
-  _mm256_storeu_si256((__m256i *)(out + 8), merge8(_mm256_max_epi32(x, y)));
-}
-
-// Stores the values at the sorted positions k[0..nk) of a[lo, hi) into out;
-// the positions are ascending and inside the range. a and b swap roles at each
-// level (b is scratch of the same size).
-void multiselect(int32_t *a, int32_t *b, uint32_t lo, uint32_t hi,
-                 const uint32_t *k, int nk, int32_t *out, int depth = 0) {
-  if (hi - lo <= 16) {
-    alignas(32) int32_t sorted[16];
-    sort16(a + lo, hi - lo, sorted);
-    for (int i = 0; i < nk; ++i)
-      out[i] = sorted[k[i] - lo];
-    return;
-  }
-  if (depth > 40) {
-    std::sort(a + lo, a + hi);
-    for (int i = 0; i < nk; ++i)
-      out[i] = a[k[i]];
-    return;
-  }
-  const int32_t x = a[lo], y = a[lo + (hi - lo) / 2], z = a[hi - 1];
-  int32_t pivot = std::max(std::min(x, y), std::min(std::max(x, y), z));
-  uint32_t cut = lo + split(a, b, lo, hi, pivot);
-  if (cut == lo) { // pivot is the minimum: peel off its duplicates
-    if (pivot == INT32_MAX) {
-      std::fill(out, out + nk, pivot);
-      return;
-    }
-    cut = lo + split(a, b, lo, hi, pivot + 1);
-    for (int i = 0; i < nk && k[i] < cut; ++i)
-      out[i] = pivot;
-    if (cut == hi)
-      return;
-    int done = std::lower_bound(k, k + nk, cut) - k;
-    if (done < nk)
-      multiselect(b, a, cut, hi, k + done, nk - done, out + done, depth + 1);
-    return;
-  }
-  const int left = std::lower_bound(k, k + nk, cut) - k;
-  if (left)
-    multiselect(b, a, lo, cut, k, left, out, depth + 1);
-  if (left < nk)
-    multiselect(b, a, cut, hi, k + left, nk - left, out + left, depth + 1);
-}
-
 // Dictionary inserts are tiny and bursty at startup, so waiters spin instead of
 // sleeping.
 struct SpinLock {
@@ -475,7 +355,6 @@ struct Job {
       for (uint32_t i = 0; i < n; ++i)
         lat[pos[rec[i].tag % kIds]++] = rec[i].lat ^ 0x80000000;
 
-    static thread_local std::vector<int32_t> scratch;
     std::unique_ptr<char[]> text = take(outbufs);
     if (!text)
       text.reset(new char[kPartCap + 256]);
@@ -489,9 +368,15 @@ struct Job {
       const uint32_t ranks[3] = {(50 * n + 99) / 100 - 1, (95 * n + 99) / 100 - 1,
                                  (99 * n + 99) / 100 - 1};
       int32_t value[3];
-      if (scratch.size() < n + 16)
-        scratch.resize(n + 16);
-      multiselect(a, scratch.data(), 0, n, ranks, 3, value);
+      if (n <= 32) {
+        std::sort(a, a + n);
+      } else {
+        std::nth_element(a, a + ranks[2], a + n);
+        std::nth_element(a, a + ranks[1], a + ranks[2] + 1);
+        std::nth_element(a, a + ranks[0], a + ranks[1] + 1);
+      }
+      for (int i = 0; i < 3; ++i)
+        value[i] = a[ranks[i]];
       std::memcpy(out, label, 21);
       for (uint32_t i = 0; i < 128; i += 32)
         _mm256_storeu_si256((__m256i *)(out + 21 + i), load(names.img[id] + i));
