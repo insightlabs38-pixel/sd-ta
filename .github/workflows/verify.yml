@@ -1,7 +1,7 @@
 name: Prize architecture qualification
 on:
   push:
-    branches: [main]
+    branches: [main, a/private-compact-recycle-20261101]
   workflow_dispatch:
 jobs:
   verify:
