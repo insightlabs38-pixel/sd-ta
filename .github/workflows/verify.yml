@@ -1,7 +1,7 @@
 name: Track A exactness
 on:
   push:
-    branches: [main, 'research/a-breakthrough-20261101-tiered']
+    branches: [main, 'research/a-breakthrough-20261101-l0-64']
   workflow_dispatch:
 jobs:
   verify:
