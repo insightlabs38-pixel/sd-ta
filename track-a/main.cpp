@@ -203,15 +203,14 @@ struct SpinLock {
   void unlock() { held.clear(std::memory_order_release); }
 };
 
-// Exact endpoint dictionary. The global part is an append-only log (key image,
-// length, fingerprint) behind a lock whose size is published with a release
-// store; entries below it never change. Each worker mirrors the log in a private
-// bucket table, so the hot lookups are plain SIMD reads without sharing. Keys
-// are stored after a space and zero-padded, so n + 1 equal bytes prove equality.
+// Slots publish an immutable key with release/acquire ordering. Readers always
+// compare the complete endpoint; hash collisions never establish identity.
+// Only insertion and the byte-ordered ID list need the writer lock.
 struct Names {
   alignas(64) char img[kIds][128]{};
-  uint32_t len[kIds]{}, hash[kIds]{};
-  std::atomic<uint32_t> size{0};
+  uint32_t len[kIds]{}, size = 0;
+  static constexpr uint32_t kSlots = 1 << 14;
+  std::atomic<uint16_t> slot[kSlots]{}; // release-published id + 1
   std::vector<uint16_t> sorted; // ids in byte order of their names (under mu)
   SpinLock mu;
 
@@ -224,66 +223,43 @@ struct Names {
     return !_bzhi_u64(~(eq(0) | eq(32)), n + 1) &&
            (n < 64 || !std::memcmp(img[id] + 64, ep + 64, n - 63));
   }
-};
-
-struct Local { // one worker's private open-addressing view of the dictionary
-  static constexpr uint32_t kSlots = 1 << 14;
-  uint16_t slot[kSlots]{}; // id + 1, or 0 when free
-  uint32_t synced = 0;
-
-  void put(uint32_t h, uint32_t id) {
-    uint32_t i = h >> 18;
-    while (slot[i])
-      i = (i + 1) % kSlots;
-    slot[i] = id + 1;
+  int lookup(const char *ep, uint32_t n, uint32_t h) const {
+    for (uint32_t i = h >> 18;; i = (i + 1) % kSlots) {
+      const uint32_t entry = slot[i].load(std::memory_order_acquire);
+      if (!entry)
+        return -1;
+      if (same(entry - 1, ep, n))
+        return entry - 1;
+    }
   }
-  int lookup(const Names &names, const char *ep, uint32_t n, uint32_t h) const {
-    for (uint32_t i = h >> 18; slot[i]; i = (i + 1) % kSlots)
-      if (names.same(slot[i] - 1, ep, n))
-        return slot[i] - 1;
-    return -1;
-  }
-  // Copies the log entries published since the last visit.
-  void sync(const Names &names) {
-    for (const uint32_t end = names.size.load(std::memory_order_acquire);
-         synced < end; ++synced)
-      put(names.hash[synced], synced);
-  }
-  uint32_t add(Names &names, const char *ep, uint32_t n, uint32_t h) {
-    sync(names);
-    if (const int id = lookup(names, ep, n, h); id >= 0)
+  uint32_t add(const char *ep, uint32_t n, uint32_t h) {
+    std::lock_guard<SpinLock> lock(mu);
+    if (const int id = lookup(ep, n, h); id >= 0)
       return id;
-    std::lock_guard<SpinLock> lock(names.mu);
-    sync(names); // another worker may have published it meanwhile
-    if (const int id = lookup(names, ep, n, h); id >= 0)
-      return id;
-    const uint32_t id = names.size.load(std::memory_order_relaxed);
+    const uint32_t id = size++;
     if (id >= kIds)
       fail("too many endpoints");
-    std::memcpy(names.img[id], ep, n);
-    names.img[id][n] = ' ';
-    names.len[id] = n;
-    names.hash[id] = h;
-    names.sorted.insert(
-        std::lower_bound(names.sorted.begin(), names.sorted.end(), id,
-                         [&](uint32_t x, uint32_t y) {
-                           return std::memcmp(names.img[x], names.img[y], 128) <
-                                  0;
-                         }),
-        id);
-    names.size.store(id + 1, std::memory_order_release);
-    put(h, id);
-    synced = id + 1;
+    std::memcpy(img[id], ep, n);
+    img[id][n] = ' ';
+    len[id] = n;
+    sorted.insert(std::lower_bound(sorted.begin(), sorted.end(), id,
+                                  [&](uint32_t x, uint32_t y) {
+                                    return std::memcmp(img[x], img[y], 128) < 0;
+                                  }), id);
+    uint32_t bucket = h >> 18;
+    while (slot[bucket].load(std::memory_order_relaxed))
+      bucket = (bucket + 1) % kSlots;
+    slot[bucket].store(id + 1, std::memory_order_release);
     return id;
   }
-  __attribute__((always_inline)) uint32_t find(Names &names, const char *ep,
+  __attribute__((always_inline)) uint32_t find(const char *ep,
                                                uint32_t n) {
     const uint64_t keep = n < 8 ? n * 8 : 64;
     const uint64_t x = _bzhi_u64(load64(ep), keep),
                    y = _bzhi_u64(load64(ep + std::max(n, 8u) - 8), keep);
     const uint32_t h = _mm_crc32_u64(_mm_crc32_u64(n, x), y);
-    const int id = lookup(names, ep, n, h);
-    return id >= 0 ? id : add(names, ep, n, h);
+    const int id = lookup(ep, n, h);
+    return id >= 0 ? id : add(ep, n, h);
   }
 };
 
@@ -365,7 +341,7 @@ struct Job {
   }
 
   // Parses one line of the stream; 256 readable bytes must follow it.
-  __attribute__((always_inline)) void line(Local &local, Stream &st,
+  __attribute__((always_inline)) void line(Stream &st,
                                            Rec *(&wp)[kHours],
                                            Rec *(&bp)[kHours]) {
     const char *p = st.pos;
@@ -387,7 +363,7 @@ struct Job {
     const uint32_t k1 = __builtin_ctzll(m);
     m &= m - 1;
     const uint32_t k2 = m ? __builtin_ctzll(m) : far_space(q);
-    const uint32_t id = local.find(names, q + k1 + 1, k2 - k1 - 1);
+    const uint32_t id = names.find( q + k1 + 1, k2 - k1 - 1);
     const char *s = q + k2 + 1;
     const uint32_t error = *s == '5';
     s += 4;
@@ -406,7 +382,7 @@ struct Job {
     st.pos = s + 1;
   }
 
-  void parse(Local &local, uint32_t block) {
+  void parse(uint32_t block) {
     Rec *wp[kHours]{}, *bp[kHours]{};
     Stream st[kStreams]; // interleaved streams overlap their latencies
     const char *p = align(block), *end = align(block + 1);
@@ -424,13 +400,13 @@ struct Job {
       for (rounds = room / kMaxLine; rounds--;) {
 #pragma GCC unroll 4
         for (Stream &x : st)
-          line(local, x, wp, bp);
+          line(x, wp, bp);
       }
       rounds = room / kMaxLine;
     }
     for (Stream &x : st)
       while (x.pos < x.stop)
-        line(local, x, wp, bp);
+        line(x, wp, bp);
 
     std::lock_guard<std::mutex> lock(mu);
     int last = 0;
@@ -474,12 +450,18 @@ struct Job {
       seen += n != 0;
     }
     std::vector<int32_t> lat = take(latbufs);
-    lat.reserve(1 << 17);
     lat.resize(total + 16);
     for (const auto &[rec, n] : mine)
       for (uint32_t i = 0; i < n; ++i)
         lat[pos[rec[i].tag % kIds]++] = rec[i].lat ^ 0x80000000;
 
+    // Scatter consumes the runs. Recycle them before percentile selection and
+    // formatting so that parsing need not allocate another generation.
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      for (const auto &[rec, n] : mine)
+        runbufs.push_back(rec);
+    }
     static thread_local std::vector<int32_t> scratch;
     auto result = take(resultbufs);
     if (!result)
@@ -501,8 +483,6 @@ struct Job {
     {
       std::lock_guard<std::mutex> lock(mu);
       latbufs.push_back(std::move(lat));
-      for (const auto &[rec, n] : mine)
-        runbufs.push_back(rec);
     }
     emit(hour, {std::move(result), seen});
   }
@@ -562,7 +542,6 @@ struct Job {
   // Finalizes hours once they are safe and otherwise parses blocks, but never
   // more than two per worker past the oldest unfinished one.
   void work(uint32_t index) {
-    const auto local = std::make_unique<Local>();
     std::unique_lock<std::mutex> lock(mu);
     for (;;) {
       if (claimable()) {
@@ -574,7 +553,7 @@ struct Job {
       } else if (next_block < nblocks && next_block < watermark + 2 * threads) {
         const uint32_t block = next_block++;
         lock.unlock();
-        parse(*local, block);
+        parse(block);
         lock.lock();
       } else if (next_hour >= kHours) {
         lock.unlock(); // drop the file mapping in shared 4 MiB steps so that
