@@ -31,8 +31,12 @@ struct __attribute__((packed)) Rec {
   uint16_t tag;
 }; // tag: id | 5xx << 11
 using Run = std::pair<Rec *, uint32_t>;
-using Part =
-    std::pair<std::unique_ptr<char[]>, size_t>; // output text, its length
+// A completed hour waits as exact numeric results, not expanded output text.
+struct Result {
+  uint32_t count, p50, p95, p99, errors;
+  uint16_t id;
+};
+using Part = std::pair<std::unique_ptr<Result[]>, uint32_t>;
 
 [[noreturn]] void fail(const char *what) {
   std::perror(what);
@@ -330,7 +334,8 @@ struct Job {
   std::atomic<size_t> zapped{0}; // 4 MiB steps of the mapping released
   std::vector<Rec *> runbufs; // free buffers, guarded by mu
   std::vector<std::vector<int32_t>> latbufs;
-  std::vector<std::unique_ptr<char[]>> outbufs;
+  std::vector<std::unique_ptr<Result[]>> resultbufs;
+  std::unique_ptr<char[]> text = std::make_unique<char[]>(kPartCap + 256);
 
   Job(const char *b, size_t n, uint32_t l, int f, uint32_t t)
       : base(b), size(n), lag(l), nblocks((n + kBlock - 1) / kBlock),
@@ -476,12 +481,9 @@ struct Job {
         lat[pos[rec[i].tag % kIds]++] = rec[i].lat ^ 0x80000000;
 
     static thread_local std::vector<int32_t> scratch;
-    std::unique_ptr<char[]> text = take(outbufs);
-    if (!text)
-      text.reset(new char[kPartCap + 256]);
-    char *out = text.get(), label[22];
-    std::snprintf(label, sizeof label, "%sT%02u:00:00Z ",
-                  kDays[(hour + 18) / 24], (hour + 18) % 24);
+    auto result = take(resultbufs);
+    if (!result)
+      result = std::make_unique<Result[]>(kIds);
     for (uint32_t i = 0; i < seen; ++i) {
       const uint16_t id = live[i];
       const uint32_t errors = count[id + kIds], n = count[id] + errors;
@@ -492,25 +494,17 @@ struct Job {
       if (scratch.size() < n + 16)
         scratch.resize(n + 16);
       multiselect(a, scratch.data(), 0, n, ranks, 3, value);
-      std::memcpy(out, label, 21);
-      for (uint32_t i = 0; i < 128; i += 32)
-        _mm256_storeu_si256((__m256i *)(out + 21 + i), load(names.img[id] + i));
-      out += 21 + names.len[id];
-      out = put(put(put(put(put(out, n), uint32_t(value[0]) ^ 0x80000000),
-                        uint32_t(value[1]) ^ 0x80000000),
-                    uint32_t(value[2]) ^ 0x80000000),
-                errors);
-      out = errors ? put(out, uint64_t{errors} * 1000000 / n) : put(out, 0);
-      *out++ = '\n';
+      result[i] = {n, uint32_t(value[0]) ^ 0x80000000,
+                   uint32_t(value[1]) ^ 0x80000000,
+                   uint32_t(value[2]) ^ 0x80000000, errors, id};
     }
-    const size_t length = out - text.get();
     {
       std::lock_guard<std::mutex> lock(mu);
       latbufs.push_back(std::move(lat));
       for (const auto &[rec, n] : mine)
         runbufs.push_back(rec);
     }
-    emit(hour, {std::move(text), length});
+    emit(hour, {std::move(result), seen});
   }
 
   // Whoever completes an hour writes all hours that are ready in order (a
@@ -524,22 +518,36 @@ struct Job {
     for (writing = true; written < kHours && parts[written].first; ++written) {
       Part part = std::move(parts[written]);
       lock.unlock();
-      for (size_t done = 0; done < part.second;) {
+      char *out = text.get(), label[22];
+      std::snprintf(label, sizeof label, "%sT%02u:00:00Z ",
+                    kDays[(written + 18) / 24], (written + 18) % 24);
+      for (uint32_t i = 0; i < part.second; ++i) {
+        const Result &r = part.first[i];
+        std::memcpy(out, label, 21);
+        for (uint32_t j = 0; j < 128; j += 32)
+          _mm256_storeu_si256((__m256i *)(out + 21 + j), load(names.img[r.id] + j));
+        out += 21 + names.len[r.id];
+        out = put(put(put(put(put(out, r.count), r.p50), r.p95), r.p99), r.errors);
+        out = put(out, uint64_t{r.errors} * 1000000 / r.count);
+        *out++ = '\n';
+      }
+      const size_t length = out - text.get();
+      for (size_t done = 0; done < length;) {
         const ssize_t w =
-            write(fd, part.first.get() + done, part.second - done);
+            write(fd, text.get() + done, length - done);
         if (w <= 0)
           fail("write summary");
         done += w;
       }
-      end[written + 1] = end[written] + part.second;
+      end[written + 1] = end[written] + length;
       if (written + 1 == kHours && ftruncate(fd, end[kHours]))
         fail("size summary");
-      sync_file_range(fd, end[written], part.second, SYNC_FILE_RANGE_WRITE);
+      sync_file_range(fd, end[written], length, SYNC_FILE_RANGE_WRITE);
       if (written >= kKeep)
         posix_fadvise(fd, 0, end[written - kKeep + 1], POSIX_FADV_DONTNEED);
       {
         std::lock_guard<std::mutex> pool_lock(mu);
-        outbufs.push_back(std::move(part.first));
+        resultbufs.push_back(std::move(part.first));
       }
       lock.lock();
     }
