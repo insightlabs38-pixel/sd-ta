@@ -297,7 +297,7 @@ struct Job {
   int fd;
   Names names;
   std::mutex mu, out_mu;
-  std::condition_variable cv;
+  std::condition_variable cv, out_cv;
   std::vector<Run> runs[kHours]; // per hour, from the registered blocks
   std::vector<int> top; // per block: its last hour, or -1 until registered
   uint32_t next_block = 0, watermark = 0, prefix_max = 0, registered = 0,
@@ -306,7 +306,6 @@ struct Job {
   Part parts[kHours];
   off_t end[kHours + 1]{}; // output offset after each hour
   uint32_t written = 0;    // hours written so far
-  bool writing = false;
   std::atomic<size_t> zapped{0}; // 4 MiB steps of the mapping released
   std::vector<Rec *> runbufs; // free buffers, guarded by mu
   std::vector<std::vector<int32_t>> latbufs;
@@ -487,15 +486,19 @@ struct Job {
     emit(hour, {std::move(result), seen});
   }
 
-  // Whoever completes an hour writes all hours that are ready in order (a
-  // thread that finds a writer active just leaves its part), starts their
-  // writeback and drops older cached output pages (best effort).
+  // Producers publish compact results; one writer expands and writes them in
+  // hour order. Parsing workers never become the output consumer.
   void emit(uint32_t hour, Part ready) {
-    std::unique_lock<std::mutex> lock(out_mu);
-    parts[hour] = std::move(ready);
-    if (writing)
-      return;
-    for (writing = true; written < kHours && parts[written].first; ++written) {
+    {
+      std::lock_guard<std::mutex> lock(out_mu);
+      parts[hour] = std::move(ready);
+    }
+    out_cv.notify_one();
+  }
+  void write_all() {
+    for (written = 0; written < kHours; ++written) {
+      std::unique_lock<std::mutex> lock(out_mu);
+      out_cv.wait(lock, [&] { return bool(parts[written].first); });
       Part part = std::move(parts[written]);
       lock.unlock();
       char *out = text.get(), label[22];
@@ -529,9 +532,7 @@ struct Job {
         std::lock_guard<std::mutex> pool_lock(mu);
         resultbufs.push_back(std::move(part.first));
       }
-      lock.lock();
     }
-    writing = false;
   }
 
   bool claimable() const {
@@ -580,11 +581,13 @@ struct Job {
     work(i);
   }
   bool run() {
+    std::thread writer([this] { write_all(); });
     start(0);
     while (started.load(std::memory_order_acquire) < threads)
       std::this_thread::yield();
     for (uint32_t i = 1; i < threads; ++i)
       pool[i].join();
+    writer.join();
     return !bad;
   }
 };
