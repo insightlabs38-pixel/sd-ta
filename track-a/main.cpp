@@ -3,6 +3,9 @@
 // hour is finalized once the finished file prefix is kLag hours past it.
 // A late line that breaks this is detected and the run is repeated exactly.
 #include <algorithm>
+#include <cerrno>
+#include <linux/aio_abi.h>
+#include <sys/syscall.h>
 #include <atomic>
 #include <charconv>
 #include <condition_variable>
@@ -290,11 +293,117 @@ __attribute__((always_inline)) char *put(char *out, uint32_t v) {
   return out + 8 - skip;
 }
 
+// Two aligned buffers keep direct writes in flight while workers continue.
+// A buffer is reused only after its kernel completion has been consumed.
+class Output {
+  static constexpr size_t kBatch = 512 << 10;
+  struct Slot { char *bytes = nullptr; iocb request{}; bool pending = false; };
+  Slot slots[2];
+  int fd;
+  aio_context_t context = 0;
+  uint64_t logical = 0, physical = 0, previous = 0, discard = 0;
+  uint32_t current = 0, pending = 0;
+  size_t used = 0;
+  void buffered() {
+    const int flags = fcntl(fd, F_GETFL);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags & ~O_DIRECT)) fail("buffered output");
+  }
+  void write_at(const char *bytes, size_t length, uint64_t at) {
+    while (length) {
+      const ssize_t n = pwrite(fd, bytes, length, at);
+      if (n < 0 && errno == EINTR) continue;
+      if (n <= 0) fail("write summary");
+      bytes += n; length -= n; at += n;
+    }
+  }
+  void reap() {
+    io_event events[2];
+    long n;
+    do { n = syscall(SYS_io_getevents, context, 1, 2, events, nullptr); }
+    while (n < 0 && errno == EINTR);
+    if (n <= 0) fail("complete output");
+    for (long i = 0; i < n; ++i) {
+      Slot &slot = slots[events[i].data];
+      if (events[i].res != static_cast<int64_t>(slot.request.aio_nbytes)) {
+        buffered(); // retry an unsupported/short direct operation exactly
+        write_at(slot.bytes, slot.request.aio_nbytes, slot.request.aio_offset);
+      }
+      slot.pending = false; --pending;
+    }
+  }
+  void submit(size_t length) {
+    Slot &slot = slots[current];
+    slot.request = {};
+    slot.request.aio_data = current;
+    slot.request.aio_lio_opcode = IOCB_CMD_PWRITE;
+    slot.request.aio_fildes = fd;
+    slot.request.aio_buf = reinterpret_cast<uint64_t>(slot.bytes);
+    slot.request.aio_nbytes = length;
+    slot.request.aio_offset = physical;
+    iocb *request = &slot.request;
+    long n;
+    do { n = syscall(SYS_io_submit, context, 1, &request); }
+    while (n < 0 && errno == EINTR);
+    if (n == 1) { slot.pending = true; ++pending; }
+    else {
+      while (pending) reap();
+      buffered();
+      syscall(SYS_io_destroy, context); context = 0;
+      write_at(slot.bytes, length, physical);
+    }
+    physical += length;
+  }
+public:
+  explicit Output(int descriptor) : fd(descriptor) {
+    buffered();
+    if (syscall(SYS_io_setup, 2, &context) != 0) { context = 0; return; }
+    const int flags = fcntl(fd, F_GETFL);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_DIRECT)) {
+      syscall(SYS_io_destroy, context); context = 0; return;
+    }
+    for (Slot &slot : slots)
+      if (posix_memalign(reinterpret_cast<void **>(&slot.bytes), 4096, kBatch))
+        fail("output buffer");
+  }
+  void append(const char *bytes, size_t length) {
+    if (!context) {
+      write_at(bytes, length, logical);
+      sync_file_range(fd, logical, length, SYNC_FILE_RANGE_WRITE);
+      if (discard) posix_fadvise(fd, 0, discard, POSIX_FADV_DONTNEED);
+      discard = previous; previous = logical; logical += length;
+      return;
+    }
+    logical += length;
+    while (length) {
+      if (!context) { write_at(bytes, length, physical); physical += length; break; }
+      Slot &slot = slots[current];
+      while (slot.pending) reap();
+      const size_t n = std::min(length, kBatch - used);
+      std::memcpy(slot.bytes + used, bytes, n);
+      used += n; bytes += n; length -= n;
+      if (used == kBatch) { submit(used); used = 0; current ^= 1; }
+    }
+  }
+  void finish() {
+    if (context) {
+      if (used) {
+        const size_t length = (used + 4095) & ~size_t(4095);
+        std::memset(slots[current].bytes + used, 0, length - used);
+        submit(length);
+      }
+      while (pending) reap();
+      if (context) syscall(SYS_io_destroy, context);
+      context = 0;
+    }
+    if (ftruncate(fd, logical)) fail("size summary");
+  }
+};
+
 struct Job {
   const char *base;
   size_t size;
   uint32_t lag, nblocks, threads;
-  int fd;
+  Output output;
   Names names;
   std::mutex mu, out_mu;
   std::condition_variable cv;
@@ -304,7 +413,6 @@ struct Job {
            next_hour = 0;
   bool bad = false; // a line arrived after its hour was finalized
   Part parts[kHours];
-  off_t end[kHours + 1]{}; // output offset after each hour
   uint32_t written = 0;    // hours written so far
   bool writing = false;
   std::atomic<size_t> zapped{0}; // 4 MiB steps of the mapping released
@@ -315,7 +423,7 @@ struct Job {
 
   Job(const char *b, size_t n, uint32_t l, int f, uint32_t t)
       : base(b), size(n), lag(l), nblocks((n + kBlock - 1) / kBlock),
-        threads(t), fd(f), top(nblocks, -1) {}
+        threads(t), output(f), top(nblocks, -1) {}
   ~Job() {
     for (Rec *r : runbufs)
       std::free(r);
@@ -512,19 +620,8 @@ struct Job {
         *out++ = '\n';
       }
       const size_t length = out - text.get();
-      for (size_t done = 0; done < length;) {
-        const ssize_t w =
-            write(fd, text.get() + done, length - done);
-        if (w <= 0)
-          fail("write summary");
-        done += w;
-      }
-      end[written + 1] = end[written] + length;
-      if (written + 1 == kHours && ftruncate(fd, end[kHours]))
-        fail("size summary");
-      sync_file_range(fd, end[written], length, SYNC_FILE_RANGE_WRITE);
-      if (written >= kKeep)
-        posix_fadvise(fd, 0, end[written - kKeep + 1], POSIX_FADV_DONTNEED);
+      output.append(text.get(), length);
+      if (written + 1 == kHours) output.finish();
       {
         std::lock_guard<std::mutex> pool_lock(mu);
         resultbufs.push_back(std::move(part.first));
