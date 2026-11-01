@@ -31,8 +31,6 @@ struct __attribute__((packed)) Rec {
   uint16_t tag;
 }; // tag: id | 5xx << 11
 using Run = std::pair<Rec *, uint32_t>;
-using Part =
-    std::pair<std::unique_ptr<char[]>, size_t>; // output text, its length
 
 [[noreturn]] void fail(const char *what) {
   std::perror(what);
@@ -317,20 +315,17 @@ struct Job {
   int fd;
   Names names;
   std::mutex mu, out_mu;
-  std::condition_variable cv;
+  std::condition_variable cv, out_cv;
   std::vector<Run> runs[kHours]; // per hour, from the registered blocks
   std::vector<int> top; // per block: its last hour, or -1 until registered
   uint32_t next_block = 0, watermark = 0, prefix_max = 0, registered = 0,
            next_hour = 0;
   bool bad = false; // a line arrived after its hour was finalized
-  Part parts[kHours];
-  off_t end[kHours + 1]{}; // output offset after each hour
-  uint32_t written = 0;    // hours written so far
-  bool writing = false;
+  off_t out_end = 0, discard_end = 0;
+  uint32_t written = 0;
   std::atomic<size_t> zapped{0}; // 4 MiB steps of the mapping released
   std::vector<Rec *> runbufs; // free buffers, guarded by mu
   std::vector<std::vector<int32_t>> latbufs;
-  std::vector<std::unique_ptr<char[]>> outbufs;
 
   Job(const char *b, size_t n, uint32_t l, int f, uint32_t t)
       : base(b), size(n), lag(l), nblocks((n + kBlock - 1) / kBlock),
@@ -476,9 +471,7 @@ struct Job {
         lat[pos[rec[i].tag % kIds]++] = rec[i].lat ^ 0x80000000;
 
     static thread_local std::vector<int32_t> scratch;
-    std::unique_ptr<char[]> text = take(outbufs);
-    if (!text)
-      text.reset(new char[kPartCap + 256]);
+    static thread_local const auto text = std::make_unique<char[]>(kPartCap + 256);
     char *out = text.get(), label[22];
     std::snprintf(label, sizeof label, "%sT%02u:00:00Z ",
                   kDays[(hour + 18) / 24], (hour + 18) % 24);
@@ -510,40 +503,29 @@ struct Job {
       for (const auto &[rec, n] : mine)
         runbufs.push_back(rec);
     }
-    emit(hour, {std::move(text), length});
+    emit(hour, text.get(), length);
   }
 
-  // Whoever completes an hour writes all hours that are ready in order (a
-  // thread that finds a writer active just leaves its part), starts their
-  // writeback and drops older cached output pages (best effort).
-  void emit(uint32_t hour, Part ready) {
+  // Bounded backpressure: a worker retains its own text until its turn to
+  // write. There is no queue of hour-sized parts or shared output-buffer pool.
+  void emit(uint32_t hour, const char *text, size_t length) {
     std::unique_lock<std::mutex> lock(out_mu);
-    parts[hour] = std::move(ready);
-    if (writing)
-      return;
-    for (writing = true; written < kHours && parts[written].first; ++written) {
-      Part part = std::move(parts[written]);
-      lock.unlock();
-      for (size_t done = 0; done < part.second;) {
-        const ssize_t w =
-            write(fd, part.first.get() + done, part.second - done);
-        if (w <= 0)
-          fail("write summary");
-        done += w;
-      }
-      end[written + 1] = end[written] + part.second;
-      if (written + 1 == kHours && ftruncate(fd, end[kHours]))
-        fail("size summary");
-      sync_file_range(fd, end[written], part.second, SYNC_FILE_RANGE_WRITE);
-      if (written >= kKeep)
-        posix_fadvise(fd, 0, end[written - kKeep + 1], POSIX_FADV_DONTNEED);
-      {
-        std::lock_guard<std::mutex> pool_lock(mu);
-        outbufs.push_back(std::move(part.first));
-      }
-      lock.lock();
+    out_cv.wait(lock, [&] { return hour == written; });
+    for (size_t done = 0; done < length;) {
+      const ssize_t n = write(fd, text + done, length - done);
+      if (n <= 0)
+        fail("write summary");
+      done += n;
     }
-    writing = false;
+    sync_file_range(fd, out_end, length, SYNC_FILE_RANGE_WRITE);
+    if (hour >= kKeep)
+      posix_fadvise(fd, 0, discard_end, POSIX_FADV_DONTNEED);
+    discard_end = out_end;
+    out_end += length;
+    if (++written == kHours && ftruncate(fd, out_end))
+      fail("size summary");
+    lock.unlock();
+    out_cv.notify_all();
   }
 
   bool claimable() const {
