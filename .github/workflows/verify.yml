@@ -1,4 +1,4 @@
-name: Prize evidence export
+name: Round 2 evidence export
 on:
   workflow_dispatch:
     inputs:
@@ -18,7 +18,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: prize-receipts
+          name: r2-receipts
           run-id: ${{ matrix.run }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: receipts
@@ -27,7 +27,7 @@ jobs:
           QUALIFICATION_RUN: ${{ matrix.run }}
         run: |
           python - <<'PY'
-          import json, os
+          import json, os, base64, zlib, hashlib
           from pathlib import Path
           run = os.environ['QUALIFICATION_RUN']
           for path in Path('receipts').rglob('*.json'):
@@ -36,3 +36,8 @@ jobs:
                   rows = [{k:v for k,v in row.items() if k != 'stat'} | {'end_anon':row['stat']['anon'], 'end_file':row['stat']['file']} for row in rows]
               print('RECEIPT '+json.dumps({'run':run, 'file':path.name, 'rows':rows}), flush=True)
           PY
+          for path in Path('receipts').rglob('*.s'):
+              payload = base64.b64encode(zlib.compress(path.read_bytes())).decode()
+              chunks = [payload[i:i+32768] for i in range(0, len(payload), 32768)]
+              for i, chunk in enumerate(chunks):
+                  print('CODEGEN '+json.dumps({'run':run, 'file':path.name, 'part':i, 'total':len(chunks), 'sha256':hashlib.sha256(path.read_bytes()).hexdigest(), 'data':chunk}), flush=True)
