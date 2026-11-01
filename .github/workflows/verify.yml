@@ -1,7 +1,7 @@
 name: Track A exactness
 on:
   push:
-    branches: [main]
+    branches: [main, 'research/a-breakthrough-20261101-owner']
   workflow_dispatch:
 jobs:
   verify:
