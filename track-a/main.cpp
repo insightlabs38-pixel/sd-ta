@@ -223,18 +223,18 @@ struct Names {
 };
 
 struct Local { // one worker's private open-addressing view of the dictionary
-  static constexpr uint32_t kSlots = 1 << 14;
+  static constexpr uint32_t kSlots = 1 << 12;
   uint16_t slot[kSlots]{}; // id + 1, or 0 when free
   uint32_t synced = 0;
 
   void put(uint32_t h, uint32_t id) {
-    uint32_t i = h >> 18;
+    uint32_t i = h >> 20;
     while (slot[i])
       i = (i + 1) % kSlots;
     slot[i] = id + 1;
   }
   int lookup(const Names &names, const char *ep, uint32_t n, uint32_t h) const {
-    for (uint32_t i = h >> 18; slot[i]; i = (i + 1) % kSlots)
+    for (uint32_t i = h >> 20; slot[i]; i = (i + 1) % kSlots)
       if (names.hash[slot[i] - 1] == h && names.same(slot[i] - 1, ep, n))
         return slot[i] - 1;
     return -1;
