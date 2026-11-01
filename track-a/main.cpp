@@ -315,6 +315,10 @@ struct Job {
   size_t size;
   uint32_t lag, nblocks, threads;
   int fd;
+  bool direct;
+  static constexpr size_t kDirectBatch = 4 << 20;
+  char *direct_buf = nullptr;
+  size_t direct_used = 0, direct_written = 0;
   Names names;
   std::mutex mu, out_mu;
   std::condition_variable cv;
@@ -332,9 +336,13 @@ struct Job {
   std::vector<std::vector<int32_t>> latbufs;
   std::vector<std::unique_ptr<char[]>> outbufs;
 
-  Job(const char *b, size_t n, uint32_t l, int f, uint32_t t)
+  Job(const char *b, size_t n, uint32_t l, int f, uint32_t t, bool d)
       : base(b), size(n), lag(l), nblocks((n + kBlock - 1) / kBlock),
-        threads(t), fd(f), top(nblocks, -1) {}
+        threads(t), fd(f), direct(d), top(nblocks, -1) {
+    if (direct && posix_memalign(reinterpret_cast<void **>(&direct_buf), 4096,
+                                 kDirectBatch))
+      fail("direct buffer");
+  }
   ~Job() {
     for (Rec *r : runbufs)
       std::free(r);
@@ -524,19 +532,46 @@ struct Job {
     for (writing = true; written < kHours && parts[written].first; ++written) {
       Part part = std::move(parts[written]);
       lock.unlock();
-      for (size_t done = 0; done < part.second;) {
-        const ssize_t w =
-            write(fd, part.first.get() + done, part.second - done);
-        if (w <= 0)
-          fail("write summary");
-        done += w;
+      if (direct) {
+        const char *p = part.first.get();
+        for (size_t left = part.second; left;) {
+          const size_t n = std::min(left, kDirectBatch - direct_used);
+          std::memcpy(direct_buf + direct_used, p, n);
+          direct_used += n;
+          p += n;
+          left -= n;
+          if (direct_used == kDirectBatch) {
+            if (pwrite(fd, direct_buf, kDirectBatch, direct_written) !=
+                static_cast<ssize_t>(kDirectBatch))
+              fail("direct write");
+            direct_written += kDirectBatch;
+            direct_used = 0;
+          }
+        }
+      } else {
+        for (size_t done = 0; done < part.second;) {
+          const ssize_t w =
+              write(fd, part.first.get() + done, part.second - done);
+          if (w <= 0)
+            fail("write summary");
+          done += w;
+        }
+        sync_file_range(fd, end[written], part.second, SYNC_FILE_RANGE_WRITE);
+        if (written >= kKeep)
+          posix_fadvise(fd, 0, end[written - kKeep + 1], POSIX_FADV_DONTNEED);
       }
       end[written + 1] = end[written] + part.second;
-      if (written + 1 == kHours && ftruncate(fd, end[kHours]))
-        fail("size summary");
-      sync_file_range(fd, end[written], part.second, SYNC_FILE_RANGE_WRITE);
-      if (written >= kKeep)
-        posix_fadvise(fd, 0, end[written - kKeep + 1], POSIX_FADV_DONTNEED);
+      if (written + 1 == kHours) {
+        if (direct && direct_used) {
+          const size_t n = (direct_used + 4095) & ~size_t(4095);
+          std::memset(direct_buf + direct_used, 0, n - direct_used);
+          if (pwrite(fd, direct_buf, n, direct_written) !=
+              static_cast<ssize_t>(n))
+            fail("direct tail");
+        }
+        if (ftruncate(fd, end[kHours]))
+          fail("size summary");
+      }
       {
         std::lock_guard<std::mutex> pool_lock(mu);
         outbufs.push_back(std::move(part.first));
@@ -618,18 +653,20 @@ int main() {
       (bytes && mmap(map, bytes, PROT_READ, MAP_PRIVATE | MAP_FIXED, in, 0) ==
                     MAP_FAILED))
     fail("map requests");
-  const int fd =
-      open((std::string(out ? out : "/out") + "/summary.txt").c_str(),
-           O_WRONLY | O_CREAT, 0644); // an old file is overwritten in place
+  const std::string output = std::string(out ? out : "/out") + "/summary.txt";
+  int fd = open(output.c_str(), O_WRONLY | O_CREAT | O_DIRECT, 0644);
+  const bool direct = fd >= 0;
+  if (!direct)
+    fd = open(output.c_str(), O_WRONLY | O_CREAT, 0644);
   if (fd < 0)
     fail("open summary");
   cpu_set_t cpus{};
   sched_getaffinity(0, sizeof cpus, &cpus);
   const uint32_t threads = forced ? std::atoi(forced) : std::min(16, CPU_COUNT(&cpus));
-  if (!(new Job(map, bytes, kLag, fd, threads))->run()) {
+  if (!(new Job(map, bytes, kLag, fd, threads, direct))->run()) {
     if (ftruncate(fd, 0) || lseek(fd, 0, SEEK_SET))
       fail("rewind summary");
-    (new Job(map, bytes, kNever, fd, threads))->run();
+    (new Job(map, bytes, kNever, fd, threads, direct))->run();
   }
   _exit(0); // the kernel reclaims everything faster than free() does
 }
