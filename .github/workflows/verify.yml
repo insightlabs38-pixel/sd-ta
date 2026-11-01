@@ -141,10 +141,12 @@ jobs:
           mkdir -p /tmp/a-prev-image
           cp /tmp/a-prev.cpp /tmp/a-prev-image/main.cpp
           cp track-a/Dockerfile /tmp/a-prev-image/Dockerfile
+          cp track-a/train.cpp /tmp/a-prev-image/train.cpp
           docker build --network=none --pull=false -t sd-track-a-prev -f /tmp/a-prev-image/Dockerfile /tmp/a-prev-image
           mkdir -p /tmp/a-packed-only-image
           cp /tmp/a-packed-only.cpp /tmp/a-packed-only-image/main.cpp
           cp track-a/Dockerfile /tmp/a-packed-only-image/Dockerfile
+          cp track-a/train.cpp /tmp/a-packed-only-image/train.cpp
           docker build --network=none --pull=false -t sd-track-a-packed-only -f /tmp/a-packed-only-image/Dockerfile /tmp/a-packed-only-image
           for label in champion packed-only candidate; do
             image=sd-track-a-prev
@@ -172,7 +174,7 @@ jobs:
           mkdir -p /tmp/pgodata /tmp/train-data /tmp/train-out
           g++ -O2 -std=c++20 -o /tmp/a-gentrain track-a/train.cpp
           /tmp/a-gentrain /tmp/train-data/requests.log
-          g++ -O3 -march=x86-64-v3 -std=c++20 -DNDEBUG -pthread -fprofile-generate=/tmp/pgodata -o /tmp/a-profiled track-a/main.cpp
+          g++ -O3 -march=x86-64-v3 -std=c++20 -DNDEBUG -pthread -DSD_PGO_TRAIN -fprofile-generate=/tmp/pgodata -o /tmp/a-profiled track-a/main.cpp
           SD_DATA_DIR=/tmp/train-data SD_OUT_DIR=/tmp/train-out /tmp/a-profiled
           find /tmp/pgodata -name '*.gcda' -printf '%p %s bytes\n'
           g++ -O3 -march=x86-64-v3 -std=c++20 -DNDEBUG -pthread -static-libstdc++ -static-libgcc -fprofile-use=/tmp/pgodata -fprofile-correction -o /tmp/a-profiled track-a/main.cpp
