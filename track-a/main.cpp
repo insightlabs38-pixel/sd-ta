@@ -397,7 +397,7 @@ struct Job {
         lat = lat * 10 + (*s - '0');
     }
     const uint64_t rec = lat | uint64_t{id | error << 11} << 32;
-    std::memcpy((*st.at)++, &rec, sizeof(Rec));
+    std::memcpy((*st.at)++, &rec, sizeof(rec));
     st.pos = s + 1;
   }
 
