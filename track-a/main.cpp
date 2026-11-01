@@ -619,5 +619,9 @@ int main() {
       fail("rewind summary");
     (new Job(map, bytes, kNever, fd, threads))->run();
   }
+#ifdef SD_PGO_TRAIN
+  std::exit(0); // flush GCC profile data in the training binary
+#else
   _exit(0); // the kernel reclaims everything faster than free() does
+#endif
 }
