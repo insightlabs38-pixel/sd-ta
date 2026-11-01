@@ -393,15 +393,10 @@ struct Job {
     const char *s = q + k2 + 1;
     const uint32_t error = *s == '5';
     s += 4;
-    uint64_t v = load64(s) ^ 0x3030303030303030, lat;
-    const uint64_t other = ((v + 0x7676767676767676) | v) & 0x8080808080808080;
-    if (other) {
-      const uint32_t digits = __builtin_ctzll(other) >> 3;
-      lat = digits8(v << (64 - 8 * digits));
-      s += digits;
-    } else {
-      for (lat = digits8(v), s += 8; *s != '\n'; ++s)
-        lat = lat * 10 + (*s - '0');
+    uint32_t lat = 0;
+    while (*s != '\n') {
+      lat = lat * 10 + uint32_t(*s - '0');
+      ++s;
     }
     const uint64_t rec = lat | uint64_t{id | error << 11} << 32;
     std::memcpy((*st.at)++, &rec, sizeof(Rec));
