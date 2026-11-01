@@ -1,4 +1,4 @@
-FROM gcc:15@sha256:eb5e64286ad47187b32bda75c6b6916166ecb41da56559b8b09e0001748d2cce AS build
+FROM gcc:16@sha256:43978d7710a803d1c3d32f4117c1528ec7285a4ce2c0a51e982ec1a6e3d87d95 AS build
 WORKDIR /src
 COPY main.cpp .
 RUN g++ -O3 -march=x86-64-v3 -std=c++20 -DNDEBUG -pthread -static -s -o /solution main.cpp
