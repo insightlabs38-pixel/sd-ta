@@ -514,9 +514,16 @@ struct Job {
       const uint32_t ranks[3] = {(50 * n + 99) / 100 - 1, (95 * n + 99) / 100 - 1,
                                  (99 * n + 99) / 100 - 1};
       int32_t value[3];
-      if (scratch.size() < n + 16)
-        scratch.resize(n + 16);
-      multiselect(a, scratch.data(), 0, n, ranks, 3, value);
+      if (n == 1) {
+        value[0] = value[1] = value[2] = a[0];
+      } else if (n == 2) {
+        value[0] = std::min(a[0], a[1]);
+        value[1] = value[2] = std::max(a[0], a[1]);
+      } else {
+        if (scratch.size() < n + 16)
+          scratch.resize(n + 16);
+        multiselect(a, scratch.data(), 0, n, ranks, 3, value);
+      }
       std::memcpy(out, label, 21);
       for (uint32_t i = 0; i < 128; i += 32)
         _mm256_storeu_si256((__m256i *)(out + 21 + i), load(names.img[id] + i));
