@@ -226,6 +226,8 @@ struct Local { // one worker's private open-addressing view of the dictionary
   static constexpr uint32_t kSlots = 1 << 14;
   uint16_t slot[kSlots]{}; // id + 1, or 0 when free
   uint32_t synced = 0;
+  struct Hot { uint32_t hash; uint16_t id, len; };
+  Hot hot[128]{}; // per-worker exact-verified L0 identity cache
 
   void put(uint32_t h, uint32_t id) {
     uint32_t i = h >> 18;
@@ -278,8 +280,13 @@ struct Local { // one worker's private open-addressing view of the dictionary
     const uint64_t x = _bzhi_u64(load64(ep), keep),
                    y = _bzhi_u64(load64(ep + std::max(n, 8u) - 8), keep);
     const uint32_t h = _mm_crc32_u64(_mm_crc32_u64(n, x), y);
+    Hot &entry = hot[(h ^ (h >> 9)) & 127];
+    if (entry.len == n && entry.hash == h &&
+        names.same(entry.id, ep, n)) return entry.id;
     const int id = lookup(names, ep, n, h);
-    return id >= 0 ? id : add(names, ep, n, h);
+    const uint32_t resolved = id >= 0 ? id : add(names, ep, n, h);
+    entry = {h, uint16_t(resolved), uint16_t(n)};
+    return resolved;
   }
 };
 
@@ -532,8 +539,6 @@ struct Job {
         done += w;
       }
       end[written + 1] = end[written] + part.second;
-      if (written + 1 == kHours && ftruncate(fd, end[kHours]))
-        fail("size summary");
       sync_file_range(fd, end[written], part.second, SYNC_FILE_RANGE_WRITE);
       if (written >= kKeep)
         posix_fadvise(fd, 0, end[written - kKeep + 1], POSIX_FADV_DONTNEED);
@@ -581,23 +586,13 @@ struct Job {
       }
     }
   }
-  std::thread pool[16]; // worker i is started by worker (i - 1) / 2
-  std::atomic<uint32_t> started{1};
-  // Workers start their children before working, so that a dozen threads are up
-  // after a few thread creations instead of eleven.
-  void start(uint32_t i) {
-    for (uint32_t c = 2 * i + 1; c <= 2 * i + 2 && c < threads; ++c) {
-      pool[c] = std::thread([this, c] { start(c); });
-      started.fetch_add(1, std::memory_order_release);
-    }
-    work(i);
-  }
   bool run() {
-    start(0);
-    while (started.load(std::memory_order_acquire) < threads)
-      std::this_thread::yield();
+    std::vector<std::thread> pool;
     for (uint32_t i = 1; i < threads; ++i)
-      pool[i].join();
+      pool.emplace_back([this, i] { work(i); });
+    work(0);
+    for (auto &t : pool)
+      t.join();
     return !bad;
   }
 };
@@ -620,7 +615,7 @@ int main() {
     fail("map requests");
   const int fd =
       open((std::string(out ? out : "/out") + "/summary.txt").c_str(),
-           O_WRONLY | O_CREAT, 0644); // an old file is overwritten in place
+           O_WRONLY | O_CREAT | O_TRUNC, 0644);
   if (fd < 0)
     fail("open summary");
   cpu_set_t cpus{};
