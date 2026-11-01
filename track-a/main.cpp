@@ -474,12 +474,16 @@ struct Job {
       seen += n != 0;
     }
     std::vector<int32_t> lat = take(latbufs);
-    lat.reserve(1 << 17);
     lat.resize(total + 16);
     for (const auto &[rec, n] : mine)
       for (uint32_t i = 0; i < n; ++i)
         lat[pos[rec[i].tag % kIds]++] = rec[i].lat ^ 0x80000000;
 
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      for (const auto &[rec, n] : mine)
+        runbufs.push_back(rec);
+    }
     static thread_local std::vector<int32_t> scratch;
     auto result = take(resultbufs);
     if (!result)
@@ -501,8 +505,6 @@ struct Job {
     {
       std::lock_guard<std::mutex> lock(mu);
       latbufs.push_back(std::move(lat));
-      for (const auto &[rec, n] : mine)
-        runbufs.push_back(rec);
     }
     emit(hour, {std::move(result), seen});
   }
