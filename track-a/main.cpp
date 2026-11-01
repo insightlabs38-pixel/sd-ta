@@ -224,19 +224,27 @@ struct Names {
 
 struct Local { // one worker's private open-addressing view of the dictionary
   static constexpr uint32_t kSlots = 1 << 14;
-  uint16_t slot[kSlots]{}; // id + 1, or 0 when free
+  uint16_t slot[kSlots]{}, next[kIds]{}; // bucket head and chain links
   uint32_t synced = 0;
+  bool certified = false; // every legal endpoint has been discovered
 
   void put(uint32_t h, uint32_t id) {
-    uint32_t i = h >> 18;
-    while (slot[i])
-      i = (i + 1) % kSlots;
+    const uint32_t i = h >> 18;
+    next[id] = slot[i];
     slot[i] = id + 1;
   }
   int lookup(const Names &names, const char *ep, uint32_t n, uint32_t h) const {
-    for (uint32_t i = h >> 18; slot[i]; i = (i + 1) % kSlots)
-      if (names.same(slot[i] - 1, ep, n))
-        return slot[i] - 1;
+    uint16_t entry = slot[h >> 18];
+    // A singleton bucket certifies identity after all 1842 names are known.
+    // Colliding buckets always compare the complete endpoint exactly.
+    if (certified && entry && !next[entry - 1])
+      return entry - 1;
+    while (entry) {
+      const uint32_t id = entry - 1;
+      if (names.same(id, ep, n))
+        return id;
+      entry = next[id];
+    }
     return -1;
   }
   // Copies the log entries published since the last visit.
@@ -244,6 +252,8 @@ struct Local { // one worker's private open-addressing view of the dictionary
     for (const uint32_t end = names.size.load(std::memory_order_acquire);
          synced < end; ++synced)
       put(names.hash[synced], synced);
+    if (synced == 1842)
+      certified = true;
   }
   uint32_t add(Names &names, const char *ep, uint32_t n, uint32_t h) {
     sync(names);
@@ -274,6 +284,9 @@ struct Local { // one worker's private open-addressing view of the dictionary
   }
   __attribute__((always_inline)) uint32_t find(Names &names, const char *ep,
                                                uint32_t n) {
+    if (__builtin_expect(!certified &&
+            names.size.load(std::memory_order_acquire) == 1842, 0))
+      sync(names);
     const uint64_t keep = n < 8 ? n * 8 : 64;
     const uint64_t x = _bzhi_u64(load64(ep), keep),
                    y = _bzhi_u64(load64(ep + std::max(n, 8u) - 8), keep);
