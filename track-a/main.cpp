@@ -223,20 +223,23 @@ struct Names {
 };
 
 struct Local { // one worker's private open-addressing view of the dictionary
-  static constexpr uint32_t kSlots = 1 << 14;
-  uint16_t slot[kSlots]{}; // id + 1, or 0 when free
+  static constexpr uint32_t kSlots = 1 << 12;
+  uint64_t slot[kSlots]{}; // 32-bit fingerprint | (id+1) lower 16
   uint32_t synced = 0;
 
   void put(uint32_t h, uint32_t id) {
-    uint32_t i = h >> 18;
+    uint32_t i = h >> 20;
     while (slot[i])
-      i = (i + 1) % kSlots;
-    slot[i] = id + 1;
+      i = (i + 1) & (kSlots - 1);
+    slot[i] = (uint64_t(h) << 16) | (id + 1);
   }
   int lookup(const Names &names, const char *ep, uint32_t n, uint32_t h) const {
-    for (uint32_t i = h >> 18; slot[i]; i = (i + 1) % kSlots)
-      if (names.same(slot[i] - 1, ep, n))
-        return slot[i] - 1;
+    for (uint32_t i = h >> 20; slot[i]; i = (i + 1) & (kSlots - 1)) {
+      const uint64_t entry = slot[i];
+      const uint32_t id = (entry & 65535) - 1;
+      if (uint32_t(entry >> 16) == h && names.same(id, ep, n))
+        return id;
+    }
     return -1;
   }
   // Copies the log entries published since the last visit.
