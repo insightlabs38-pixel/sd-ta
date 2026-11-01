@@ -3,8 +3,6 @@
 // hour is finalized once the finished file prefix is kLag hours past it.
 // A late line that breaks this is detected and the run is repeated exactly.
 #include <algorithm>
-#include <barrier>
-#include <malloc.h>
 #include <atomic>
 #include <charconv>
 #include <condition_variable>
@@ -23,7 +21,7 @@
 
 namespace {
 constexpr uint32_t kHours = 72, kIds = 2048, kBlock = 256 << 10, kStreams = 4;
-constexpr uint32_t kLag = 2, kNever = 1000, kKeep = 2;
+constexpr uint32_t kLag = 2, kNever = 1000;
 constexpr uint32_t kMaxLine = 178, kRunCap = kBlock / 40 + 16, kPartCap = kIds * 256;
 const char *const kDays[] = {"2026-10-30", "2026-10-31", "2026-11-01",
                              "2026-11-02"};
@@ -33,10 +31,13 @@ struct __attribute__((packed)) Rec {
   uint16_t tag;
 }; // tag: id | 5xx << 11
 using Run = std::pair<Rec *, uint32_t>;
-// Queued rows contain only endpoint ID and already formatted numeric suffix.
-// The ordered writer supplies repeated hour/name prefixes through one buffer.
-constexpr uint32_t kSuffixCap = kIds * 70 + 256;
-using Part = std::pair<std::unique_ptr<char[]>, size_t>;
+constexpr size_t kRunBytes = (kRunCap * sizeof(Rec) + 8 + 4095) & ~size_t{4095};
+// A completed hour waits as exact numeric results, not expanded output text.
+struct Result {
+  uint32_t count, p50, p95, p99, errors;
+  uint16_t id;
+};
+using Part = std::pair<std::unique_ptr<Result[]>, uint32_t>;
 
 [[noreturn]] void fail(const char *what) {
   std::perror(what);
@@ -296,29 +297,29 @@ struct Job {
   uint32_t lag, nblocks, threads;
   int fd;
   Names names;
-  std::mutex mu;
+  std::mutex mu, out_mu;
   std::condition_variable cv;
   std::vector<Run> runs[kHours]; // per hour, from the registered blocks
-  std::barrier<> phase;
   std::vector<int> top; // per block: its last hour, or -1 until registered
   uint32_t next_block = 0, watermark = 0, prefix_max = 0, registered = 0,
            next_hour = 0;
   bool bad = false; // a line arrived after its hour was finalized
   Part parts[kHours];
-  size_t hour_bytes[kHours]{}, offset[kHours + 1]{};
-  char *output = nullptr;
-  std::atomic<uint32_t> next_output{0};
+  off_t end[kHours + 1]{}; // output offset after each hour
+  uint32_t written = 0;    // hours written so far
+  bool writing = false;
   std::atomic<size_t> zapped{0}; // 4 MiB steps of the mapping released
   std::vector<Rec *> runbufs; // free buffers, guarded by mu
   std::vector<std::vector<int32_t>> latbufs;
+  std::vector<std::unique_ptr<Result[]>> resultbufs;
+  std::unique_ptr<char[]> text = std::make_unique<char[]>(kPartCap + 256);
 
   Job(const char *b, size_t n, uint32_t l, int f, uint32_t t)
       : base(b), size(n), lag(l), nblocks((n + kBlock - 1) / kBlock),
-        threads(t), fd(f), phase(t), top(nblocks, -1) {}
+        threads(t), fd(f), top(nblocks, -1) {}
   ~Job() {
     for (Rec *r : runbufs)
-      std::free(r);
-    if (output) munmap(output, offset[kHours]);
+      munmap(r, kRunBytes);
   }
 
   template <class T> T take(std::vector<T> &pool) {
@@ -350,10 +351,13 @@ struct Job {
       st.at = wp + (p[9] + (p[6] & 1)) * 24 + p[11] * 10 + p[12] - 1698;
       if (!*st.at) {
         Rec *r = take(runbufs);
-        *st.at = bp[st.at - wp] =
-            r ? r
-              : static_cast<Rec *>(
-                    std::malloc(kRunCap * sizeof(Rec) + sizeof(uint64_t)));
+        if (!r) {
+          r = static_cast<Rec *>(mmap(nullptr, kRunBytes, PROT_READ | PROT_WRITE,
+                                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+          if (r == MAP_FAILED) fail("map run");
+          madvise(r, kRunBytes, MADV_NOHUGEPAGE);
+        }
+        *st.at = bp[st.at - wp] = r;
       }
     }
     _mm_prefetch(p + 1280, _MM_HINT_T0);
@@ -426,7 +430,7 @@ struct Job {
     cv.notify_all();
   }
 
-  void finalize(uint32_t hour, std::vector<int32_t> &scratch) {
+  void finalize(uint32_t hour) {
     std::vector<Run> mine;
     std::vector<uint16_t> order;
     {
@@ -449,7 +453,6 @@ struct Job {
       live[seen] = id;
       seen += n != 0;
     }
-    if (!total) return;
     std::vector<int32_t> lat = take(latbufs);
     lat.resize(total + 16);
     for (const auto &[rec, n] : mine)
@@ -458,13 +461,19 @@ struct Job {
 
     // Scatter consumes the runs. Recycle them before percentile selection and
     // formatting so that parsing need not allocate another generation.
+    // Keep virtual buffers for cheap reuse, but release their dead physical
+    // pages before expanded output adds persistent tmpfs pages to the cgroup.
+    for (const auto &[rec, n] : mine)
+      madvise(rec, kRunBytes, MADV_DONTNEED);
     {
       std::lock_guard<std::mutex> lock(mu);
       for (const auto &[rec, n] : mine)
         runbufs.push_back(rec);
     }
-    std::unique_ptr<char[]> suffix(new char[kSuffixCap]);
-    char *out = suffix.get();
+    static thread_local std::vector<int32_t> scratch;
+    auto result = take(resultbufs);
+    if (!result)
+      result = std::make_unique<Result[]>(kIds);
     for (uint32_t i = 0; i < seen; ++i) {
       const uint16_t id = live[i];
       const uint32_t errors = count[id + kIds], n = count[id] + errors;
@@ -475,61 +484,58 @@ struct Job {
       if (scratch.size() < n + 16)
         scratch.resize(n + 16);
       multiselect(a, scratch.data(), 0, n, ranks, 3, value);
-      char *const row = out;
-      std::memcpy(out, &id, sizeof id);
-      out += 3; // endpoint ID, then suffix length (at most 67)
-      char *const digits = out;
-      out = put(put(put(put(put(out, n), uint32_t(value[0]) ^ 0x80000000),
-                        uint32_t(value[1]) ^ 0x80000000),
-                    uint32_t(value[2]) ^ 0x80000000), errors);
-      out = errors ? put(out, uint64_t{errors} * 1000000 / n) : put(out, 0);
-      *out++ = '\n';
-      row[2] = out - digits;
-      hour_bytes[hour] += 21 + names.len[id] + (out - digits);
+      result[i] = {n, uint32_t(value[0]) ^ 0x80000000,
+                   uint32_t(value[1]) ^ 0x80000000,
+                   uint32_t(value[2]) ^ 0x80000000, errors, id};
     }
     {
       std::lock_guard<std::mutex> lock(mu);
       latbufs.push_back(std::move(lat));
     }
-    const size_t length = out - suffix.get();
-    parts[hour] = {std::move(suffix), length};
+    emit(hour, {std::move(result), seen});
   }
 
-  // Parse/selection storage is dead before output pages are allocated. Large
-  // suffix frames are individually reclaimable as parallel expansion finishes.
-  void prepare_output() {
-    for (Rec *r : runbufs) std::free(r);
-    runbufs.clear();
-    std::vector<std::vector<int32_t>>().swap(latbufs);
-    if (bad) for (Part &part : parts) part = Part{};
-    malloc_trim(0);
-    if (bad) return;
-    for (uint32_t h = 0; h < kHours; ++h) offset[h + 1] = offset[h] + hour_bytes[h];
-    if (ftruncate(fd, offset[kHours])) fail("size summary");
-    if (!offset[kHours]) return;
-    output = static_cast<char *>(mmap(nullptr, offset[kHours], PROT_READ | PROT_WRITE,
-                                     MAP_SHARED, fd, 0));
-    if (output == MAP_FAILED) fail("map summary");
-    madvise(output, offset[kHours], MADV_NOHUGEPAGE);
-  }
-  void expand(uint32_t h) {
-    Part part = std::move(parts[h]);
-    if (!part.first) return;
-    char *out = output + offset[h], label[22];
-    std::snprintf(label, sizeof label, "%sT%02u:00:00Z ",
-                  kDays[(h + 18) / 24], (h + 18) % 24);
-    const char *row = part.first.get(), *stop = row + part.second;
-    while (row < stop) {
-      uint16_t id;
-      std::memcpy(&id, row, sizeof id);
-      const uint32_t n = static_cast<unsigned char>(row[2]);
-      std::memcpy(out, label, 21);
-      std::memcpy(out + 21, names.img[id], names.len[id]);
-      out += 21 + names.len[id];
-      std::memcpy(out, row + 3, n);
-      row += 3 + n; out += n;
+  // Whoever completes an hour writes all hours that are ready in order (a
+  // thread that finds a writer active just leaves its part).
+  void emit(uint32_t hour, Part ready) {
+    std::unique_lock<std::mutex> lock(out_mu);
+    parts[hour] = std::move(ready);
+    if (writing)
+      return;
+    for (writing = true; written < kHours && parts[written].first; ++written) {
+      Part part = std::move(parts[written]);
+      lock.unlock();
+      char *out = text.get(), label[22];
+      std::snprintf(label, sizeof label, "%sT%02u:00:00Z ",
+                    kDays[(written + 18) / 24], (written + 18) % 24);
+      for (uint32_t i = 0; i < part.second; ++i) {
+        const Result &r = part.first[i];
+        std::memcpy(out, label, 21);
+        for (uint32_t j = 0; j < 128; j += 32)
+          _mm256_storeu_si256((__m256i *)(out + 21 + j), load(names.img[r.id] + j));
+        out += 21 + names.len[r.id];
+        out = put(put(put(put(put(out, r.count), r.p50), r.p95), r.p99), r.errors);
+        out = put(out, uint64_t{r.errors} * 1000000 / r.count);
+        *out++ = '\n';
+      }
+      const size_t length = out - text.get();
+      for (size_t done = 0; done < length;) {
+        const ssize_t w =
+            write(fd, text.get() + done, length - done);
+        if (w <= 0)
+          fail("write summary");
+        done += w;
+      }
+      end[written + 1] = end[written] + length;
+      if (written + 1 == kHours && ftruncate(fd, end[kHours]))
+        fail("size summary");
+      {
+        std::lock_guard<std::mutex> pool_lock(mu);
+        resultbufs.push_back(std::move(part.first));
+      }
+      lock.lock();
     }
-    if (out != output + offset[h + 1]) fail("summary span");
+    writing = false;
   }
 
   bool claimable() const {
@@ -540,14 +546,13 @@ struct Job {
   // Finalizes hours once they are safe and otherwise parses blocks, but never
   // more than two per worker past the oldest unfinished one.
   void work(uint32_t index) {
-    std::vector<int32_t> scratch;
     std::unique_lock<std::mutex> lock(mu);
     for (;;) {
       if (claimable()) {
         const uint32_t hour = next_hour++;
         cv.notify_all();
         lock.unlock();
-        finalize(hour, scratch);
+        finalize(hour);
         lock.lock();
       } else if (next_block < nblocks && next_block < watermark + 2 * threads) {
         const uint32_t block = next_block++;
@@ -561,41 +566,35 @@ struct Job {
         for (size_t at; (at = zapped++ * kStep) < size;)
           madvise(const_cast<char *>(base) + at, std::min(kStep, size - at),
                   MADV_DONTNEED);
-        break;
+        return;
       } else {
         cv.wait(lock);
       }
     }
-    std::vector<int32_t>().swap(scratch);
-    phase.arrive_and_wait();
-    if (index == 0) prepare_output();
-    phase.arrive_and_wait();
-    if (!bad)
-      for (uint32_t h; (h = next_output++) < kHours;) expand(h);
   }
   std::thread pool[16]; // worker i is started by worker (i - 1) / 2
+  std::atomic<uint32_t> started{1};
   // Workers start their children before working, so that a dozen threads are up
   // after a few thread creations instead of eleven.
   void start(uint32_t i) {
     for (uint32_t c = 2 * i + 1; c <= 2 * i + 2 && c < threads; ++c) {
       pool[c] = std::thread([this, c] { start(c); });
+      started.fetch_add(1, std::memory_order_release);
     }
     work(i);
   }
   bool run() {
     start(0);
+    while (started.load(std::memory_order_acquire) < threads)
+      std::this_thread::yield();
     for (uint32_t i = 1; i < threads; ++i)
       pool[i].join();
-    if (output) { munmap(output, offset[kHours]); output = nullptr; }
     return !bad;
   }
 };
 } // namespace
 
 int main() {
-  // Keep suffix frames reclaimable when their expansion finishes.
-  mallopt(M_MMAP_THRESHOLD, 64 << 10);
-  mallopt(M_ARENA_MAX, 2);
   const char *const dir = std::getenv("SD_DATA_DIR"),
                     *const out = std::getenv("SD_OUT_DIR"),
                     *const forced = std::getenv("SD_THREADS");
@@ -612,7 +611,7 @@ int main() {
     fail("map requests");
   const int fd =
       open((std::string(out ? out : "/out") + "/summary.txt").c_str(),
-           O_RDWR | O_CREAT, 0644);
+           O_WRONLY | O_CREAT, 0644); // an old file is overwritten in place
   if (fd < 0)
     fail("open summary");
   cpu_set_t cpus{};
