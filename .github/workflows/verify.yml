@@ -156,6 +156,15 @@ jobs:
           docker build --network=none --pull=false -t sd-r2-reclaim-test /tmp/reclaim-image
           python tests/r2_exact_compare.py --work /tmp/reclaim --organizer /tmp/organizer --probe-image sd-r2-reclaim-test --data /tmp/a-full --trials 3 --seeds 1 --threads 1
           cp /tmp/reclaim/fresh-runs.json /tmp/r2/reclamation.json
+      - name: Compaction overlap, page alignment and high-water bound
+        run: |
+          mkdir -p /tmp/compact-image
+          g++ -O2 -march=x86-64-v3 -std=c++20 -pthread -static-libstdc++ -static-libgcc tests/mapped_compaction.cpp -o /tmp/compact-image/solution
+          chmod 755 /tmp/compact-image/solution
+          cp /tmp/reclaim-image/Dockerfile /tmp/compact-image/Dockerfile
+          docker build --network=none --pull=false -t sd-r2-compaction-test /tmp/compact-image
+          python tests/r2_exact_compare.py --work /tmp/compact --organizer /tmp/organizer --probe-image sd-r2-compaction-test --data /tmp/a-full --trials 3 --seeds 1 --threads 1
+          cp /tmp/compact/fresh-runs.json /tmp/r2/compaction.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
