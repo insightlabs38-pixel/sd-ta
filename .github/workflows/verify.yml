@@ -1,7 +1,7 @@
 name: Track A exactness
 on:
   push:
-    branches: [main]
+    branches: [main, 'research/a-breakthrough-20261101-single-mask']
   workflow_dispatch:
 jobs:
   verify:
@@ -77,8 +77,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --depth=1 origin 82493a17ff0d784abbaa35f23590e10545724fe9
-          git show 82493a17ff0d784abbaa35f23590e10545724fe9:track-a/main.cpp > /tmp/a-prev.cpp
+          git fetch --depth=1 origin 306c538a4c2d9bdbcf830652f947df69fa5ca213
+          git show 306c538a4c2d9bdbcf830652f947df69fa5ca213:track-a/main.cpp > /tmp/a-prev.cpp
           g++ -O3 -march=x86-64-v3 -std=c++20 -DNDEBUG -pthread -static-libstdc++ -static-libgcc -o /tmp/a-prev-v3 /tmp/a-prev.cpp
           git fetch --depth=1 origin 8ec49c42ed9b2fc0e4df0bca489a1cc7ae13d4dd
           git show 8ec49c42ed9b2fc0e4df0bca489a1cc7ae13d4dd:track-a/main.cpp > /tmp/a-packed-only.cpp
