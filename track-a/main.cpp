@@ -378,7 +378,10 @@ struct Job {
     _mm_prefetch(p + 1280, _MM_HINT_T0);
     _mm_prefetch(p + 1344, _MM_HINT_T0);
     const char *q = p + 28;
-    uint64_t m = spaces(q) | uint64_t{spaces(q + 32)} << 32;
+    const uint32_t first = spaces(q);
+    uint64_t m = first;
+    if (__builtin_popcount(first) < 2)
+      m |= uint64_t(spaces(q + 32)) << 32;
     const uint32_t k1 = __builtin_ctzll(m);
     m &= m - 1;
     const uint32_t k2 = m ? __builtin_ctzll(m) : far_space(q);
