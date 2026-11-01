@@ -235,7 +235,7 @@ struct Local { // one worker's private open-addressing view of the dictionary
   }
   int lookup(const Names &names, const char *ep, uint32_t n, uint32_t h) const {
     for (uint32_t i = h >> 18; slot[i]; i = (i + 1) % kSlots)
-      if (names.same(slot[i] - 1, ep, n))
+      if (names.hash[slot[i] - 1] == h && names.same(slot[i] - 1, ep, n))
         return slot[i] - 1;
     return -1;
   }
