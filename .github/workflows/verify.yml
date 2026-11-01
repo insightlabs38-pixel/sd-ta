@@ -191,7 +191,7 @@ jobs:
                   value=int(subprocess.check_output(command,text=True).strip())
                   peaks[key].append(value)
                   print(f'OFFICIAL_LINK_M trial={trial+1} label={key} bytes={value}',flush=True)
-          a,b=(statistics.median(peaks[k]) for k in ('main','candidate')
+          a,b=(statistics.median(peaks[k]) for k in ('main','candidate'))
           print(f'OFFICIAL_LINK_M_MEDIAN main={a:.0f} candidate={b:.0f} ratio={b/a:.5f}',flush=True)
           PY
       - name: Summary
