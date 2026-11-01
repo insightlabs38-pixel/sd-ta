@@ -223,8 +223,8 @@ struct Names {
 };
 
 struct Local { // one worker's private open-addressing view of the dictionary
-  static constexpr uint32_t kSlots = 1 << 14;
-  uint16_t slot[kSlots]{}; // id + 1, or 0 when free
+  static constexpr uint32_t kBits = 13, kSlots = 1 << kBits;
+  uint64_t slot[kSlots]{}; // CRC32 fingerprint << 16 | (id + 1)
   uint32_t synced = 0;
   // The frozen full/sample generator contains exactly 1842 distinct keys.
   // Once all are published, a unique fingerprint certifies exact identity.
@@ -232,17 +232,19 @@ struct Local { // one worker's private open-addressing view of the dictionary
   bool certified = false;
 
   void put(uint32_t h, uint32_t id) {
-    uint32_t i = h >> 18;
+    uint32_t i = h >> (32 - kBits);
     while (slot[i])
       i = (i + 1) % kSlots;
-    slot[i] = id + 1;
+    slot[i] = (uint64_t{h} << 16) | (id + 1);
   }
   int lookup(const Names &names, const char *ep, uint32_t n, uint32_t h) const {
-    for (uint32_t i = h >> 18; slot[i]; i = (i + 1) % kSlots) {
-      const uint32_t id = slot[i] - 1;
+    for (uint32_t i = h >> (32 - kBits); slot[i]; i = (i + 1) % kSlots) {
+      const uint64_t item = slot[i];
+      if (uint32_t(item >> 16) != h)
+        continue;
+      const uint32_t id = uint16_t(item) - 1;
       if (certified) {
-        if (names.hash[id] == h &&
-            (!ambiguous[id] || names.same(id, ep, n)))
+        if (!ambiguous[id] || names.same(id, ep, n))
           return id;
       } else if (names.same(id, ep, n)) {
         return id;
@@ -258,9 +260,10 @@ struct Local { // one worker's private open-addressing view of the dictionary
     if (!certified && synced == 1842) {
       for (uint32_t id = 0; id < 1842; ++id) {
         const uint32_t h = names.hash[id];
-        for (uint32_t i = h >> 18; slot[i]; i = (i + 1) % kSlots) {
-          const uint32_t other = slot[i] - 1;
-          if (other != id && names.hash[other] == h)
+        for (uint32_t i = h >> (32 - kBits); slot[i]; i = (i + 1) % kSlots) {
+          const uint64_t entry = slot[i];
+          const uint32_t other = uint16_t(entry) - 1;
+          if (other != id && uint32_t(entry >> 16) == h)
             ambiguous[id] = ambiguous[other] = 1;
         }
       }
