@@ -24,6 +24,8 @@ jobs:
           python tests/sizes.py "$PWD/solution"
       - name: Dense minimum-length record differential
         run: python tests/dense.py "$PWD/solution"
+      - name: Exact escape words and randomized full-catalogue differential
+        run: python tests/word4_escape.py "$PWD/solution"
       - name: Verify official seed-1 tiny, sample and full hashes
         shell: bash
         run: |
