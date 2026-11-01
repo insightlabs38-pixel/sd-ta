@@ -223,18 +223,18 @@ struct Names {
 };
 
 struct Local { // one worker's private open-addressing view of the dictionary
-  static constexpr uint32_t kSlots = 1 << 12;
+  static constexpr uint32_t kSlots = 1 << 13;
   uint64_t slot[kSlots]{}; // 32-bit fingerprint | (id+1) lower 16
   uint32_t synced = 0;
 
   void put(uint32_t h, uint32_t id) {
-    uint32_t i = h >> 20;
+    uint32_t i = h >> 19;
     while (slot[i])
       i = (i + 1) & (kSlots - 1);
     slot[i] = (uint64_t(h) << 16) | (id + 1);
   }
   int lookup(const Names &names, const char *ep, uint32_t n, uint32_t h) const {
-    for (uint32_t i = h >> 20; slot[i]; i = (i + 1) & (kSlots - 1)) {
+    for (uint32_t i = h >> 19; slot[i]; i = (i + 1) & (kSlots - 1)) {
       const uint64_t entry = slot[i];
       const uint32_t id = (entry & 65535) - 1;
       if (uint32_t(entry >> 16) == h && names.same(id, ep, n))
