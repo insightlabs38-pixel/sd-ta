@@ -1,4 +1,4 @@
-name: Track A exactness
+name: Prize architecture qualification
 on:
   push:
     branches: [main]
@@ -6,7 +6,10 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 25
+    env:
+      ASAN_OPTIONS: halt_on_error=1:abort_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -73,44 +76,6 @@ jobs:
               TSAN_OPTIONS=halt_on_error=1 SD_THREADS=$threads SD_DATA_DIR="$data" SD_OUT_DIR=/tmp/a-out /tmp/solution-tsan
             done
           done
-      - name: Compare full-input end-to-end runtime with verified champion
-        shell: bash
-        run: |
-          set -euo pipefail
-          git fetch --depth=1 origin 82493a17ff0d784abbaa35f23590e10545724fe9
-          git show 82493a17ff0d784abbaa35f23590e10545724fe9:track-a/main.cpp > /tmp/a-prev.cpp
-          g++ -O3 -march=x86-64-v3 -std=c++20 -DNDEBUG -pthread -static-libstdc++ -static-libgcc -o /tmp/a-prev-v3 /tmp/a-prev.cpp
-          git fetch --depth=1 origin 8ec49c42ed9b2fc0e4df0bca489a1cc7ae13d4dd
-          git show 8ec49c42ed9b2fc0e4df0bca489a1cc7ae13d4dd:track-a/main.cpp > /tmp/a-packed-only.cpp
-          g++ -O3 -march=x86-64-v3 -std=c++20 -DNDEBUG -pthread -static-libstdc++ -static-libgcc -o /tmp/a-packed-only /tmp/a-packed-only.cpp
-          python - <<'PY' | tee -a /tmp/summary.txt
-          import hashlib, os, random, statistics, subprocess, time
-          env = dict(os.environ, SD_DATA_DIR='/tmp/a-full', SD_OUT_DIR='/tmp/a-out')
-          expected = '495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3'
-          binaries = {'qualified-base': '/tmp/a-prev-v3', 'prior': '/tmp/a-packed-only', 'candidate': './solution'}
-          samples = {key: [] for key in binaries}
-          rng = random.Random(20261030)
-          for _ in range(31):
-              order = list(binaries)
-              rng.shuffle(order)
-              for key in order:
-                  start = time.perf_counter()
-                  subprocess.run([binaries[key]], env=env, check=True)
-                  samples[key].append(time.perf_counter() - start)
-                  with open('/tmp/a-out/summary.txt', 'rb') as f:
-                      assert hashlib.sha256(f.read()).hexdigest() == expected
-          old = statistics.median(samples['qualified-base'])
-          new = statistics.median(samples['candidate'])
-          print(f'Full seed-1 31-run medians: qualified-base={old:.6f}s prior={statistics.median(samples["prior"]):.6f}s candidate={new:.6f}s ratio={new/old:.4f}', flush=True)
-          PY
-      - name: Compare full-input peak RSS
-        shell: bash
-        run: |
-          set -euo pipefail
-          SD_DATA_DIR=/tmp/a-full SD_OUT_DIR=/tmp/a-out /usr/bin/time -f 'champion RSS KiB=%M' -o /tmp/a-rss-prev /tmp/a-prev-v3
-          SD_DATA_DIR=/tmp/a-full SD_OUT_DIR=/tmp/a-out /usr/bin/time -f 'packed-only RSS KiB=%M' -o /tmp/a-rss-packed-only /tmp/a-packed-only
-          SD_DATA_DIR=/tmp/a-full SD_OUT_DIR=/tmp/a-out /usr/bin/time -f 'candidate RSS KiB=%M' -o /tmp/a-rss-new ./solution
-          cat /tmp/a-rss-prev /tmp/a-rss-packed-only /tmp/a-rss-new
       - name: Validate Docker allowlist and offline sandbox
         shell: bash
         run: |
@@ -134,33 +99,25 @@ jobs:
             sd-track-a
           echo '495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3  /tmp/a-container-out/summary.txt' | sha256sum -c -
 
-      - name: Compare scored-style cgroup memory peaks
+      - name: Matched pinned-toolchain axes
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p /tmp/a-prev-image
-          cp /tmp/a-prev.cpp /tmp/a-prev-image/main.cpp
-          cp track-a/Dockerfile /tmp/a-prev-image/Dockerfile
-          docker build --network=none --pull=false -t sd-track-a-prev -f /tmp/a-prev-image/Dockerfile /tmp/a-prev-image
-          mkdir -p /tmp/a-packed-only-image
-          cp /tmp/a-packed-only.cpp /tmp/a-packed-only-image/main.cpp
-          cp track-a/Dockerfile /tmp/a-packed-only-image/Dockerfile
-          docker build --network=none --pull=false -t sd-track-a-packed-only -f /tmp/a-packed-only-image/Dockerfile /tmp/a-packed-only-image
-          for label in champion packed-only candidate; do
-            image=sd-track-a-prev
-            if [ "$label" = packed-only ]; then image=sd-track-a-packed-only; fi
-            if [ "$label" = candidate ]; then image=sd-track-a; fi
-            echo "Measuring $label cgroup memory.peak across five fresh runs" | tee -a /tmp/summary.txt
-            peak=0
-            for trial in 1 2 3 4 5; do
-              current=$(docker run --rm --network=none --read-only --memory=8g --memory-swap=8g --pids-limit=512 --tmpfs /tmp:rw,size=1g \
-                --mount type=bind,source=/tmp/a-full,target=/data,readonly \
-                --mount type=bind,source=/tmp/a-container-out,target=/out \
-                --entrypoint /bin/sh "$image" -c '/solution && cat /sys/fs/cgroup/memory.peak')
-              echo "$label trial=$trial memory.peak=$current" | tee -a /tmp/summary.txt
-              if (( current > peak )); then peak=$current; fi
-            done
-            echo "$label max5=$peak" | tee -a /tmp/summary.txt
+          git fetch origin 4aa987898640222750cd5ee68500c3f3b9967375
+          mkdir -p /tmp/champion-context
+          git show FETCH_HEAD:track-a/main.cpp > /tmp/champion-context/main.cpp
+          cp track-a/Dockerfile /tmp/champion-context/Dockerfile
+          docker build --network=none --pull=false -t sd-champion /tmp/champion-context
+          for pair in sd-champion:champion sd-track-a:candidate; do
+            image=${pair%:*}
+            label=${pair#*:}
+            cid=$(docker create "$image")
+            docker cp "$cid:/solution" "/tmp/$label"
+            docker rm "$cid"
           done
-      - name: Summary
-        run: cat /tmp/summary.txt
+          python tests/prize_compare.py --work /tmp/prize --organizer /tmp/organizer --champion /tmp/champion --candidate /tmp/candidate --docker
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: prize-receipts
+          path: /tmp/prize/
