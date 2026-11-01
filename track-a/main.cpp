@@ -392,7 +392,7 @@ public:
         submit(length);
       }
       while (pending) reap();
-      if (context) syscall(SYS_io_destroy, context);
+      // All writes are complete; the process owns the context until exit.
       context = 0;
     }
     if (ftruncate(fd, logical)) fail("size summary");
