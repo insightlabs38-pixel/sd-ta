@@ -132,10 +132,15 @@ __m256i merge8(__m256i v) { // v is a bitonic sequence
 void sort16(const int32_t *a, uint32_t n, int32_t *out) {
   const __m256i iota = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7),
                 big = _mm256_set1_epi32(INT32_MAX), count = _mm256_set1_epi32(n);
-  __m256i x = _mm256_blendv_epi8(big, load(a), _mm256_cmpgt_epi32(count, iota)),
-          y = _mm256_blendv_epi8(
-              big, load(a + 8),
-              _mm256_cmpgt_epi32(count, _mm256_add_epi32(iota, _mm256_set1_epi32(8))));
+  __m256i x = _mm256_blendv_epi8(big, load(a), _mm256_cmpgt_epi32(count, iota));
+  // Most endpoint-hour groups are short; one AVX2 network suffices for <=8.
+  if (n <= 8) {
+    _mm256_storeu_si256((__m256i *)out, sort8(x));
+    return;
+  }
+  __m256i y = _mm256_blendv_epi8(
+      big, load(a + 8),
+      _mm256_cmpgt_epi32(count, _mm256_add_epi32(iota, _mm256_set1_epi32(8))));
   x = sort8(x);
   y = _mm256_permutevar8x32_epi32(sort8(y), _mm256_setr_epi32(7, 6, 5, 4, 3, 2, 1, 0));
   _mm256_storeu_si256((__m256i *)out, merge8(_mm256_min_epi32(x, y)));
@@ -147,6 +152,13 @@ void sort16(const int32_t *a, uint32_t n, int32_t *out) {
 // level (b is scratch of the same size).
 void multiselect(int32_t *a, int32_t *b, uint32_t lo, uint32_t hi,
                  const uint32_t *k, int nk, int32_t *out, int depth = 0) {
+  if (hi - lo <= 2) {
+    const int32_t x = a[lo], y = hi - lo == 2 ? a[lo + 1] : x;
+    const int32_t low = std::min(x, y), high = std::max(x, y);
+    for (int i = 0; i < nk; ++i)
+      out[i] = k[i] == lo ? low : high;
+    return;
+  }
   if (hi - lo <= 16) {
     alignas(32) int32_t sorted[16];
     sort16(a + lo, hi - lo, sorted);
