@@ -482,6 +482,7 @@ struct Job {
     size_t capacity = 256; // slack for the 128-byte endpoint stores
     for (uint32_t i = 0; i < seen; ++i)
       capacity += 79 + names.len[live[i]];
+    capacity = std::max<size_t>(capacity, 256 << 10);
     Part text = take(outbufs);
     if (text.capacity < capacity) {
       text.data.reset(new char[capacity]);
