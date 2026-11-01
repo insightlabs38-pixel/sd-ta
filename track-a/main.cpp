@@ -217,6 +217,8 @@ struct Names {
                  _mm256_cmpeq_epi8(load(ep + i), load(img[id] + i)))))
              << i;
     };
+    if (n < 32)
+      return !_bzhi_u64(~eq(0), n + 1);
     return !_bzhi_u64(~(eq(0) | eq(32)), n + 1) &&
            (n < 64 || !std::memcmp(img[id] + 64, ep + 64, n - 63));
   }
