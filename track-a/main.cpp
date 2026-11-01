@@ -3,6 +3,8 @@
 // hour is finalized once the finished file prefix is kLag hours past it.
 // A late line that breaks this is detected and the run is repeated exactly.
 #include <algorithm>
+#include <barrier>
+#include <malloc.h>
 #include <atomic>
 #include <charconv>
 #include <condition_variable>
@@ -294,29 +296,29 @@ struct Job {
   uint32_t lag, nblocks, threads;
   int fd;
   Names names;
-  std::mutex mu, out_mu;
+  std::mutex mu;
   std::condition_variable cv;
   std::vector<Run> runs[kHours]; // per hour, from the registered blocks
+  std::barrier<> phase;
   std::vector<int> top; // per block: its last hour, or -1 until registered
   uint32_t next_block = 0, watermark = 0, prefix_max = 0, registered = 0,
            next_hour = 0;
   bool bad = false; // a line arrived after its hour was finalized
   Part parts[kHours];
-  off_t end[kHours + 1]{}; // output offset after each hour
-  uint32_t written = 0;    // hours written so far
-  bool writing = false;
+  size_t hour_bytes[kHours]{}, offset[kHours + 1]{};
+  char *output = nullptr;
+  std::atomic<uint32_t> next_output{0};
   std::atomic<size_t> zapped{0}; // 4 MiB steps of the mapping released
   std::vector<Rec *> runbufs; // free buffers, guarded by mu
   std::vector<std::vector<int32_t>> latbufs;
-  std::vector<std::unique_ptr<char[]>> suffixbufs;
-  std::unique_ptr<char[]> text = std::make_unique<char[]>(kPartCap + 256);
 
   Job(const char *b, size_t n, uint32_t l, int f, uint32_t t)
       : base(b), size(n), lag(l), nblocks((n + kBlock - 1) / kBlock),
-        threads(t), fd(f), top(nblocks, -1) {}
+        threads(t), fd(f), phase(t), top(nblocks, -1) {}
   ~Job() {
     for (Rec *r : runbufs)
       std::free(r);
+    if (output) munmap(output, offset[kHours]);
   }
 
   template <class T> T take(std::vector<T> &pool) {
@@ -424,7 +426,7 @@ struct Job {
     cv.notify_all();
   }
 
-  void finalize(uint32_t hour) {
+  void finalize(uint32_t hour, std::vector<int32_t> &scratch) {
     std::vector<Run> mine;
     std::vector<uint16_t> order;
     {
@@ -447,6 +449,7 @@ struct Job {
       live[seen] = id;
       seen += n != 0;
     }
+    if (!total) return;
     std::vector<int32_t> lat = take(latbufs);
     lat.resize(total + 16);
     for (const auto &[rec, n] : mine)
@@ -460,10 +463,7 @@ struct Job {
       for (const auto &[rec, n] : mine)
         runbufs.push_back(rec);
     }
-    static thread_local std::vector<int32_t> scratch;
-    auto suffix = take(suffixbufs);
-    if (!suffix)
-      suffix.reset(new char[kSuffixCap]);
+    std::unique_ptr<char[]> suffix(new char[kSuffixCap]);
     char *out = suffix.get();
     for (uint32_t i = 0; i < seen; ++i) {
       const uint16_t id = live[i];
@@ -485,63 +485,51 @@ struct Job {
       out = errors ? put(out, uint64_t{errors} * 1000000 / n) : put(out, 0);
       *out++ = '\n';
       row[2] = out - digits;
+      hour_bytes[hour] += 21 + names.len[id] + (out - digits);
     }
     {
       std::lock_guard<std::mutex> lock(mu);
       latbufs.push_back(std::move(lat));
     }
     const size_t length = out - suffix.get();
-    emit(hour, {std::move(suffix), length});
+    parts[hour] = {std::move(suffix), length};
   }
 
-  // Whoever completes an hour writes all hours that are ready in order (a
-  // thread that finds a writer active just leaves its part), starts their
-  // writeback and drops older cached output pages (best effort).
-  void emit(uint32_t hour, Part ready) {
-    std::unique_lock<std::mutex> lock(out_mu);
-    parts[hour] = std::move(ready);
-    if (writing)
-      return;
-    for (writing = true; written < kHours && parts[written].first; ++written) {
-      Part part = std::move(parts[written]);
-      lock.unlock();
-      char *out = text.get(), label[22];
-      std::snprintf(label, sizeof label, "%sT%02u:00:00Z ",
-                    kDays[(written + 18) / 24], (written + 18) % 24);
-      const char *row = part.first.get(), *stop = row + part.second;
-      while (row < stop) {
-        uint16_t id;
-        std::memcpy(&id, row, sizeof id);
-        const uint32_t n = static_cast<unsigned char>(row[2]);
-        std::memcpy(out, label, 21);
-        for (uint32_t j = 0; j < 128; j += 32)
-          _mm256_storeu_si256((__m256i *)(out + 21 + j), load(names.img[id] + j));
-        out += 21 + names.len[id];
-        std::memcpy(out, row + 3, n);
-        row += 3 + n;
-        out += n;
-      }
-      const size_t length = out - text.get();
-      for (size_t done = 0; done < length;) {
-        const ssize_t w =
-            write(fd, text.get() + done, length - done);
-        if (w <= 0)
-          fail("write summary");
-        done += w;
-      }
-      end[written + 1] = end[written] + length;
-      if (written + 1 == kHours && ftruncate(fd, end[kHours]))
-        fail("size summary");
-      sync_file_range(fd, end[written], length, SYNC_FILE_RANGE_WRITE);
-      if (written >= kKeep)
-        posix_fadvise(fd, 0, end[written - kKeep + 1], POSIX_FADV_DONTNEED);
-      {
-        std::lock_guard<std::mutex> pool_lock(mu);
-        suffixbufs.push_back(std::move(part.first));
-      }
-      lock.lock();
+  // Parse/selection storage is dead before output pages are allocated. Large
+  // suffix frames are individually reclaimable as parallel expansion finishes.
+  void prepare_output() {
+    for (Rec *r : runbufs) std::free(r);
+    runbufs.clear();
+    std::vector<std::vector<int32_t>>().swap(latbufs);
+    if (bad) for (Part &part : parts) part = Part{};
+    malloc_trim(0);
+    if (bad) return;
+    for (uint32_t h = 0; h < kHours; ++h) offset[h + 1] = offset[h] + hour_bytes[h];
+    if (ftruncate(fd, offset[kHours])) fail("size summary");
+    if (!offset[kHours]) return;
+    output = static_cast<char *>(mmap(nullptr, offset[kHours], PROT_READ | PROT_WRITE,
+                                     MAP_SHARED, fd, 0));
+    if (output == MAP_FAILED) fail("map summary");
+    madvise(output, offset[kHours], MADV_NOHUGEPAGE);
+  }
+  void expand(uint32_t h) {
+    Part part = std::move(parts[h]);
+    if (!part.first) return;
+    char *out = output + offset[h], label[22];
+    std::snprintf(label, sizeof label, "%sT%02u:00:00Z ",
+                  kDays[(h + 18) / 24], (h + 18) % 24);
+    const char *row = part.first.get(), *stop = row + part.second;
+    while (row < stop) {
+      uint16_t id;
+      std::memcpy(&id, row, sizeof id);
+      const uint32_t n = static_cast<unsigned char>(row[2]);
+      std::memcpy(out, label, 21);
+      std::memcpy(out + 21, names.img[id], names.len[id]);
+      out += 21 + names.len[id];
+      std::memcpy(out, row + 3, n);
+      row += 3 + n; out += n;
     }
-    writing = false;
+    if (out != output + offset[h + 1]) fail("summary span");
   }
 
   bool claimable() const {
@@ -552,13 +540,14 @@ struct Job {
   // Finalizes hours once they are safe and otherwise parses blocks, but never
   // more than two per worker past the oldest unfinished one.
   void work(uint32_t index) {
+    std::vector<int32_t> scratch;
     std::unique_lock<std::mutex> lock(mu);
     for (;;) {
       if (claimable()) {
         const uint32_t hour = next_hour++;
         cv.notify_all();
         lock.unlock();
-        finalize(hour);
+        finalize(hour, scratch);
         lock.lock();
       } else if (next_block < nblocks && next_block < watermark + 2 * threads) {
         const uint32_t block = next_block++;
@@ -572,35 +561,41 @@ struct Job {
         for (size_t at; (at = zapped++ * kStep) < size;)
           madvise(const_cast<char *>(base) + at, std::min(kStep, size - at),
                   MADV_DONTNEED);
-        return;
+        break;
       } else {
         cv.wait(lock);
       }
     }
+    std::vector<int32_t>().swap(scratch);
+    phase.arrive_and_wait();
+    if (index == 0) prepare_output();
+    phase.arrive_and_wait();
+    if (!bad)
+      for (uint32_t h; (h = next_output++) < kHours;) expand(h);
   }
   std::thread pool[16]; // worker i is started by worker (i - 1) / 2
-  std::atomic<uint32_t> started{1};
   // Workers start their children before working, so that a dozen threads are up
   // after a few thread creations instead of eleven.
   void start(uint32_t i) {
     for (uint32_t c = 2 * i + 1; c <= 2 * i + 2 && c < threads; ++c) {
       pool[c] = std::thread([this, c] { start(c); });
-      started.fetch_add(1, std::memory_order_release);
     }
     work(i);
   }
   bool run() {
     start(0);
-    while (started.load(std::memory_order_acquire) < threads)
-      std::this_thread::yield();
     for (uint32_t i = 1; i < threads; ++i)
       pool[i].join();
+    if (output) { munmap(output, offset[kHours]); output = nullptr; }
     return !bad;
   }
 };
 } // namespace
 
 int main() {
+  // Keep suffix frames reclaimable when their expansion finishes.
+  mallopt(M_MMAP_THRESHOLD, 64 << 10);
+  mallopt(M_ARENA_MAX, 2);
   const char *const dir = std::getenv("SD_DATA_DIR"),
                     *const out = std::getenv("SD_OUT_DIR"),
                     *const forced = std::getenv("SD_THREADS");
@@ -617,7 +612,7 @@ int main() {
     fail("map requests");
   const int fd =
       open((std::string(out ? out : "/out") + "/summary.txt").c_str(),
-           O_WRONLY | O_CREAT, 0644); // an old file is overwritten in place
+           O_RDWR | O_CREAT, 0644);
   if (fd < 0)
     fail("open summary");
   cpu_set_t cpus{};
