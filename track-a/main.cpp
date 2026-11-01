@@ -26,11 +26,15 @@ constexpr uint32_t kMaxLine = 178, kRunCap = kBlock / 40 + 16, kPartCap = kIds *
 const char *const kDays[] = {"2026-10-30", "2026-10-31", "2026-11-01",
                              "2026-11-02"};
 
-struct __attribute__((packed)) Rec {
-  uint32_t lat;
-  uint16_t tag;
-}; // tag: id | 5xx << 11
-using Run = std::pair<Rec *, uint32_t>;
+// Every logical record takes exactly four bytes. Exceptional latencies
+// are stored, in record order, in an exact sidecar per registered run.
+using Rec = uint32_t;
+constexpr uint32_t kOverflow = (1u << 20) - 1;
+struct Run {
+  Rec *rec;
+  uint32_t n;
+  std::vector<uint32_t> overflow;
+};
 using Part =
     std::pair<std::unique_ptr<char[]>, size_t>; // output text, its length
 
@@ -387,7 +391,8 @@ struct Job {
   // Parses one line of the stream; 256 readable bytes must follow it.
   __attribute__((always_inline)) void line(Local &local, Stream &st,
                                            Rec *(&wp)[kHours],
-                                           Rec *(&bp)[kHours]) {
+                                           Rec *(&bp)[kHours],
+                                           std::vector<uint32_t> (&ov)[kHours]) {
     const char *p = st.pos;
     if (const uint64_t date = load64(p + 5); date != st.date) {
       st.date = date;
@@ -421,13 +426,16 @@ struct Job {
       for (lat = digits8(v), s += 8; *s != '\n'; ++s)
         lat = lat * 10 + (*s - '0');
     }
-    const uint64_t rec = lat | uint64_t{id | error << 11} << 32;
-    std::memcpy((*st.at)++, &rec, sizeof(Rec));
+    const uint32_t small = lat < kOverflow ? uint32_t(lat) : kOverflow;
+    *(*st.at)++ = (small << 12) | (id | error << 11);
+    if (__builtin_expect(small == kOverflow, 0))
+      ov[st.at - wp].push_back(uint32_t(lat));
     st.pos = s + 1;
   }
 
   void parse(Local &local, uint32_t block) {
     Rec *wp[kHours]{}, *bp[kHours]{};
+    std::vector<uint32_t> ov[kHours];
     Stream st[kStreams]; // interleaved streams overlap their latencies
     const char *p = align(block), *end = align(block + 1);
     for (uint32_t i = 0; i < kStreams; ++i) {
@@ -444,13 +452,13 @@ struct Job {
       for (rounds = room / kMaxLine; rounds--;) {
 #pragma GCC unroll 4
         for (Stream &x : st)
-          line(local, x, wp, bp);
+          line(local, x, wp, bp, ov);
       }
       rounds = room / kMaxLine;
     }
     for (Stream &x : st)
       while (x.pos < x.stop)
-        line(local, x, wp, bp);
+        line(local, x, wp, bp, ov);
 
     std::lock_guard<std::mutex> lock(mu);
     int last = 0;
@@ -462,7 +470,8 @@ struct Job {
         bad = true;
         runbufs.push_back(bp[h]);
       } else
-        runs[h].push_back({bp[h], static_cast<uint32_t>(wp[h] - bp[h])});
+        runs[h].push_back({bp[h], static_cast<uint32_t>(wp[h] - bp[h]),
+                           std::move(ov[h])});
     }
     top[block] = last;
     for (++registered; watermark < nblocks && top[watermark] >= 0; ++watermark)
@@ -481,9 +490,9 @@ struct Job {
     }
     uint32_t count[2 * kIds] = {}, pos[kIds],
                        total = 0; // by tag: ids, then their 5xx
-    for (const auto &[rec, n] : mine)
-      for (uint32_t i = 0; i < n; ++i)
-        ++count[rec[i].tag];
+    for (const Run &run : mine)
+      for (uint32_t i = 0; i < run.n; ++i)
+        ++count[run.rec[i] & (2 * kIds - 1)];
     uint16_t live[kIds]; // the endpoints seen in this hour, in output order
     uint32_t seen = 0;
     for (const uint16_t id : order) {
@@ -496,9 +505,16 @@ struct Job {
     std::vector<int32_t> lat = take(latbufs);
     lat.reserve(1 << 17);
     lat.resize(total + 16);
-    for (const auto &[rec, n] : mine)
-      for (uint32_t i = 0; i < n; ++i)
-        lat[pos[rec[i].tag % kIds]++] = rec[i].lat ^ 0x80000000;
+    for (const Run &run : mine) {
+      uint32_t ex = 0;
+      for (uint32_t i = 0; i < run.n; ++i) {
+        const uint32_t word = run.rec[i];
+        uint32_t value = word >> 12;
+        if (__builtin_expect(value == kOverflow, 0))
+          value = run.overflow[ex++];
+        lat[pos[word & (kIds - 1)]++] = value ^ 0x80000000;
+      }
+    }
 
     static thread_local std::vector<int32_t> scratch;
     std::unique_ptr<char[]> text = take(outbufs);
@@ -532,8 +548,8 @@ struct Job {
     {
       std::lock_guard<std::mutex> lock(mu);
       latbufs.push_back(std::move(lat));
-      for (const auto &[rec, n] : mine)
-        runbufs.push_back(rec);
+      for (const Run &run : mine)
+        runbufs.push_back(run.rec);
     }
     emit(hour, {std::move(text), length});
   }
