@@ -233,15 +233,26 @@ struct Local { // one worker's private open-addressing view of the dictionary
   // Fast lane: a unique first eight endpoint bytes identify a known key only
   // after the frozen catalogue is complete. Colliding buckets fall back exactly.
   static constexpr uint32_t kFastSlots = 1 << 14;
-  uint16_t prefix[kFastSlots]{};
+  uint16_t prefix[kFastSlots]{}, prefix16[kFastSlots]{};
   int prefix_find(const Names &names, const char *ep) const {
     if (!certified) return -1;
     const uint64_t head = load64(ep);
     const uint16_t v = prefix[_mm_crc32_u64(0, head) & (kFastSlots - 1)];
-    if (!v || v == 0xffff) return -1;
-    const uint32_t id = v - 1;
-    return load64(names.img[id]) == head && ep[names.len[id]] == ' '
-               ? int(id) : -1;
+    if (v && v != 0xffff) {
+      const uint32_t id = v - 1;
+      if (load64(names.img[id]) == head && ep[names.len[id]] == ' ')
+        return int(id);
+    }
+    const uint64_t tail = load64(ep + 8);
+    const uint16_t w = prefix16[_mm_crc32_u64(_mm_crc32_u64(0, head), tail) & (kFastSlots - 1)];
+    if (w && w != 0xffff) {
+      const uint32_t id = w - 1;
+      if (load64(names.img[id]) == head &&
+          load64(names.img[id] + 8) == tail &&
+          ep[names.len[id]] == ' ')
+        return int(id);
+    }
+    return -1;
   }
 
   void put(uint32_t h, uint32_t id) {
@@ -281,6 +292,16 @@ struct Local { // one worker's private open-addressing view of the dictionary
         if (names.len[id] < 8) continue;
         const uint32_t ix = _mm_crc32_u64(0, load64(names.img[id])) & (kFastSlots - 1);
         uint16_t &v = prefix[ix];
+        if (!v) v = id + 1;
+        else if (v != id + 1) v = 0xffff;
+      }
+      for (uint32_t id = 0; id < 1842; ++id) {
+        if (names.len[id] < 16) continue;
+        const uint64_t head = load64(names.img[id]);
+        const uint32_t ix =
+          _mm_crc32_u64(_mm_crc32_u64(0, head), load64(names.img[id] + 8)) &
+          (kFastSlots - 1);
+        uint16_t &v = prefix16[ix];
         if (!v) v = id + 1;
         else if (v != id + 1) v = 0xffff;
       }
