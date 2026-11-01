@@ -37,7 +37,8 @@ using Run = std::pair<Rec *, uint32_t>;
 struct Result {
   uint32_t count, p50, p95, p99, errors, endpoint_ppm;
 }; // endpoint ID occupies 11 bits; the exact error ppm occupies the rest
-using Part = std::pair<std::unique_ptr<Result[]>, uint32_t>;
+constexpr size_t kFrameBytes = sizeof(Result) * kIds;
+static_assert(kFrameBytes % 4096 == 0);
 
 uint32_t width(uint32_t value) {
   static constexpr uint32_t powers[] = {1, 10, 100, 1000, 10000, 100000,
@@ -313,7 +314,8 @@ struct Job {
   uint32_t next_block = 0, watermark = 0, prefix_max = 0, registered = 0,
            next_hour = 0;
   bool bad = false; // a line arrived after its hour was finalized
-  Part parts[kHours];
+  Result *results;
+  uint32_t rows[kHours]{};
   size_t hour_bytes[kHours]{}, offset[kHours + 1]{};
   char *output = nullptr;
   std::atomic<uint32_t> next_output{0};
@@ -323,8 +325,14 @@ struct Job {
 
   Job(const char *b, size_t n, uint32_t l, int f, uint32_t t)
       : base(b), size(n), lag(l), nblocks((n + kBlock - 1) / kBlock),
-        threads(t), fd(f), phase(t), top(nblocks, -1) {}
+        threads(t), fd(f), phase(t), top(nblocks, -1) {
+    results = static_cast<Result *>(mmap(nullptr, kFrameBytes * kHours,
+        PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    if (results == MAP_FAILED) fail("map results");
+    madvise(results, kFrameBytes * kHours, MADV_NOHUGEPAGE);
+  }
   ~Job() {
+    munmap(results, kFrameBytes * kHours);
     for (Rec *r : runbufs)
       std::free(r);
     if (output) munmap(output, offset[kHours]);
@@ -472,7 +480,7 @@ struct Job {
       for (const auto &[rec, n] : mine)
         runbufs.push_back(rec);
     }
-    std::unique_ptr<Result[]> results(new Result[seen]);
+    Result *const frame = results + size_t{hour} * kIds;
     for (uint32_t i = 0; i < seen; ++i) {
       const uint16_t id = live[i];
       const uint32_t errors = count[id + kIds], n = count[id] + errors;
@@ -484,7 +492,7 @@ struct Job {
         scratch.resize(n + 16);
       multiselect(a, scratch.data(), 0, n, ranks, 3, value);
       const uint32_t ppm = uint64_t{errors} * 1000000 / n;
-      Result &r = results[i];
+      Result &r = frame[i];
       r = {n, uint32_t(value[0]) ^ 0x80000000, uint32_t(value[1]) ^ 0x80000000,
            uint32_t(value[2]) ^ 0x80000000, errors, id | ppm << 11};
       hour_bytes[hour] += 28 + names.len[id] + width(n) + width(r.p50) +
@@ -494,16 +502,16 @@ struct Job {
       std::lock_guard<std::mutex> lock(mu);
       latbufs.push_back(std::move(lat));
     }
-    parts[hour] = {std::move(results), seen};
+    rows[hour] = seen;
   }
 
   // Parse/selection storage is dead before output pages are allocated. Large
-  // result frames are individually reclaimable as parallel expansion finishes.
+  // result frames are page aligned and released as parallel expansion finishes.
   void prepare_output() {
     for (Rec *r : runbufs) std::free(r);
     runbufs.clear();
     std::vector<std::vector<int32_t>>().swap(latbufs);
-    if (bad) for (Part &part : parts) part = Part{};
+    if (bad) madvise(results, kFrameBytes * kHours, MADV_DONTNEED);
     malloc_trim(0);
     if (bad) return;
     for (uint32_t h = 0; h < kHours; ++h) offset[h + 1] = offset[h] + hour_bytes[h];
@@ -515,19 +523,19 @@ struct Job {
     madvise(output, offset[kHours], MADV_NOHUGEPAGE);
   }
   void expand(uint32_t h) {
-    Part part = std::move(parts[h]);
-    if (!part.first) return;
+    if (!rows[h]) return;
+    Result *const frame = results + size_t{h} * kIds;
     char *out = output + offset[h], label[22];
     std::snprintf(label, sizeof label, "%sT%02u:00:00Z ",
                   kDays[(h + 18) / 24], (h + 18) % 24);
-    for (uint32_t i = 0; i < part.second; ++i) {
-      const Result &r = part.first[i];
+    for (uint32_t i = 0; i < rows[h]; ++i) {
+      const Result &r = frame[i];
       const uint32_t id = r.endpoint_ppm % kIds;
       std::memcpy(out, label, 21);
       std::memcpy(out + 21, names.img[id], names.len[id]);
       out += 21 + names.len[id];
       // Local slack keeps vector-width numeric stores inside this hour's span.
-      char suffix[80], *start = i + 1 == part.second ? suffix : out, *end = start;
+      char suffix[80], *start = i + 1 == rows[h] ? suffix : out, *end = start;
       end = put(put(put(put(put(end, r.count), r.p50), r.p95), r.p99), r.errors);
       end = put(end, r.endpoint_ppm >> 11);
       *end++ = '\n';
@@ -535,6 +543,7 @@ struct Job {
       out += end - start;
     }
     if (out != output + offset[h + 1]) fail("summary span");
+    madvise(frame, kFrameBytes, MADV_DONTNEED);
   }
 
   bool claimable() const {
