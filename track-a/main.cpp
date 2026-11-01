@@ -571,7 +571,7 @@ struct Job {
       } else if (next_hour >= kHours) {
         lock.unlock(); // drop the file mapping in shared 4 MiB steps so that
                        // exit is cheaper
-        constexpr size_t kStep = 4 << 20;
+        constexpr size_t kStep = 32 << 20;
         for (size_t at; (at = zapped++ * kStep) < size;)
           madvise(const_cast<char *>(base) + at, std::min(kStep, size - at),
                   MADV_DONTNEED);
