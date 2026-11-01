@@ -33,10 +33,19 @@ struct __attribute__((packed)) Rec {
   uint16_t tag;
 }; // tag: id | 5xx << 11
 using Run = std::pair<Rec *, uint32_t>;
-// Queued rows contain only endpoint ID and already formatted numeric suffix.
-// The ordered writer supplies repeated hour/name prefixes through one buffer.
-constexpr uint32_t kSuffixCap = kIds * 70 + 256;
-using Part = std::pair<std::unique_ptr<char[]>, size_t>;
+// Completed hours retain only exact numeric results until output offsets exist.
+struct Result {
+  uint32_t count, p50, p95, p99, errors, endpoint_ppm;
+}; // endpoint ID occupies 11 bits; the exact error ppm occupies the rest
+using Part = std::pair<std::unique_ptr<Result[]>, uint32_t>;
+
+uint32_t width(uint32_t value) {
+  static constexpr uint32_t powers[] = {1, 10, 100, 1000, 10000, 100000,
+                                        1000000, 10000000, 100000000, 1000000000};
+  value |= value == 0;
+  const uint32_t estimate = (32 - __builtin_clz(value)) * 1233 >> 12;
+  return estimate + 1 - (value < powers[estimate]);
+}
 
 [[noreturn]] void fail(const char *what) {
   std::perror(what);
@@ -463,8 +472,7 @@ struct Job {
       for (const auto &[rec, n] : mine)
         runbufs.push_back(rec);
     }
-    std::unique_ptr<char[]> suffix(new char[kSuffixCap]);
-    char *out = suffix.get();
+    std::unique_ptr<Result[]> results(new Result[seen]);
     for (uint32_t i = 0; i < seen; ++i) {
       const uint16_t id = live[i];
       const uint32_t errors = count[id + kIds], n = count[id] + errors;
@@ -475,28 +483,22 @@ struct Job {
       if (scratch.size() < n + 16)
         scratch.resize(n + 16);
       multiselect(a, scratch.data(), 0, n, ranks, 3, value);
-      char *const row = out;
-      std::memcpy(out, &id, sizeof id);
-      out += 3; // endpoint ID, then suffix length (at most 67)
-      char *const digits = out;
-      out = put(put(put(put(put(out, n), uint32_t(value[0]) ^ 0x80000000),
-                        uint32_t(value[1]) ^ 0x80000000),
-                    uint32_t(value[2]) ^ 0x80000000), errors);
-      out = errors ? put(out, uint64_t{errors} * 1000000 / n) : put(out, 0);
-      *out++ = '\n';
-      row[2] = out - digits;
-      hour_bytes[hour] += 21 + names.len[id] + (out - digits);
+      const uint32_t ppm = uint64_t{errors} * 1000000 / n;
+      Result &r = results[i];
+      r = {n, uint32_t(value[0]) ^ 0x80000000, uint32_t(value[1]) ^ 0x80000000,
+           uint32_t(value[2]) ^ 0x80000000, errors, id | ppm << 11};
+      hour_bytes[hour] += 28 + names.len[id] + width(n) + width(r.p50) +
+                          width(r.p95) + width(r.p99) + width(errors) + width(ppm);
     }
     {
       std::lock_guard<std::mutex> lock(mu);
       latbufs.push_back(std::move(lat));
     }
-    const size_t length = out - suffix.get();
-    parts[hour] = {std::move(suffix), length};
+    parts[hour] = {std::move(results), seen};
   }
 
   // Parse/selection storage is dead before output pages are allocated. Large
-  // suffix frames are individually reclaimable as parallel expansion finishes.
+  // result frames are individually reclaimable as parallel expansion finishes.
   void prepare_output() {
     for (Rec *r : runbufs) std::free(r);
     runbufs.clear();
@@ -518,16 +520,19 @@ struct Job {
     char *out = output + offset[h], label[22];
     std::snprintf(label, sizeof label, "%sT%02u:00:00Z ",
                   kDays[(h + 18) / 24], (h + 18) % 24);
-    const char *row = part.first.get(), *stop = row + part.second;
-    while (row < stop) {
-      uint16_t id;
-      std::memcpy(&id, row, sizeof id);
-      const uint32_t n = static_cast<unsigned char>(row[2]);
+    for (uint32_t i = 0; i < part.second; ++i) {
+      const Result &r = part.first[i];
+      const uint32_t id = r.endpoint_ppm % kIds;
       std::memcpy(out, label, 21);
       std::memcpy(out + 21, names.img[id], names.len[id]);
       out += 21 + names.len[id];
-      std::memcpy(out, row + 3, n);
-      row += 3 + n; out += n;
+      // Local slack keeps vector-width numeric stores inside this hour's span.
+      char suffix[80], *start = i + 1 == part.second ? suffix : out, *end = start;
+      end = put(put(put(put(put(end, r.count), r.p50), r.p95), r.p99), r.errors);
+      end = put(end, r.endpoint_ppm >> 11);
+      *end++ = '\n';
+      if (start == suffix) std::memcpy(out, suffix, end - start);
+      out += end - start;
     }
     if (out != output + offset[h + 1]) fail("summary span");
   }
@@ -593,7 +598,7 @@ struct Job {
 } // namespace
 
 int main() {
-  // Keep suffix frames reclaimable when their expansion finishes.
+  // Keep large workspaces independently reclaimable between phases.
   mallopt(M_MMAP_THRESHOLD, 64 << 10);
   mallopt(M_ARENA_MAX, 2);
   const char *const dir = std::getenv("SD_DATA_DIR"),
