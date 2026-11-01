@@ -11,6 +11,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <immintrin.h>
+#include <malloc.h>
 #include <memory>
 #include <mutex>
 #include <sched.h>
@@ -614,6 +615,9 @@ struct Job {
 } // namespace
 
 int main() {
+  // Return transient large allocations via mmap; bound per-thread arenas.
+  mallopt(M_MMAP_THRESHOLD, 64 << 10);
+  mallopt(M_ARENA_MAX, 2);
   const char *const dir = std::getenv("SD_DATA_DIR"),
                     *const out = std::getenv("SD_OUT_DIR"),
                     *const forced = std::getenv("SD_THREADS");
