@@ -26,11 +26,14 @@ constexpr uint32_t kMaxLine = 178, kRunCap = kBlock / 40 + 16, kPartCap = kIds *
 const char *const kDays[] = {"2026-10-30", "2026-10-31", "2026-11-01",
                              "2026-11-02"};
 
-struct __attribute__((packed)) Rec {
-  uint32_t lat;
-  uint16_t tag;
-}; // tag: id | 5xx << 11
-using Run = std::pair<Rec *, uint32_t>;
+// A block-relative pointer to the latency text, plus the exact endpoint/error
+// tag. The input mapping remains alive until every hour has been finalized.
+using Rec = uint32_t;
+struct Run {
+  Rec *rec;
+  uint32_t n;
+  const char *base;
+};
 using Part =
     std::pair<std::unique_ptr<char[]>, size_t>; // output text, its length
 
@@ -321,7 +324,7 @@ struct Job {
   std::vector<Run> runs[kHours]; // per hour, from the registered blocks
   std::vector<int> top; // per block: its last hour, or -1 until registered
   uint32_t next_block = 0, watermark = 0, prefix_max = 0, registered = 0,
-           next_hour = 0;
+           next_hour = 0, finished = 0;
   bool bad = false; // a line arrived after its hour was finalized
   Part parts[kHours];
   off_t end[kHours + 1]{}; // output offset after each hour
@@ -362,7 +365,7 @@ struct Job {
   // Parses one line of the stream; 256 readable bytes must follow it.
   __attribute__((always_inline)) void line(Local &local, Stream &st,
                                            Rec *(&wp)[kHours],
-                                           Rec *(&bp)[kHours]) {
+                                           Rec *(&bp)[kHours], const char *block_base) {
     const char *p = st.pos;
     if (const uint64_t date = load64(p + 5); date != st.date) {
       st.date = date;
@@ -386,19 +389,10 @@ struct Job {
     const char *s = q + k2 + 1;
     const uint32_t error = *s == '5';
     s += 4;
-    uint64_t v = load64(s) ^ 0x3030303030303030, lat;
-    const uint64_t other = ((v + 0x7676767676767676) | v) & 0x8080808080808080;
-    if (other) {
-      const uint32_t digits = __builtin_ctzll(other) >> 3;
-      lat = digits8(v << (64 - 8 * digits));
-      s += digits;
-    } else {
-      for (lat = digits8(v), s += 8; *s != '\n'; ++s)
-        lat = lat * 10 + (*s - '0');
-    }
-    const uint64_t rec = lat | uint64_t{id | error << 11} << 32;
-    std::memcpy((*st.at)++, &rec, sizeof(Rec));
-    st.pos = s + 1;
+    const uint32_t digits = __builtin_ctz(_mm_movemask_epi8(_mm_cmpeq_epi8(
+        _mm_loadu_si128((const __m128i *)s), _mm_set1_epi8('\n'))));
+    *(*st.at)++ = uint32_t(s - block_base) << 12 | id | error << 11;
+    st.pos = s + digits + 1;
   }
 
   void parse(Local &local, uint32_t block) {
@@ -419,13 +413,13 @@ struct Job {
       for (rounds = room / kMaxLine; rounds--;) {
 #pragma GCC unroll 4
         for (Stream &x : st)
-          line(local, x, wp, bp);
+          line(local, x, wp, bp, p);
       }
       rounds = room / kMaxLine;
     }
     for (Stream &x : st)
       while (x.pos < x.stop)
-        line(local, x, wp, bp);
+        line(local, x, wp, bp, p);
 
     std::lock_guard<std::mutex> lock(mu);
     int last = 0;
@@ -437,7 +431,7 @@ struct Job {
         bad = true;
         runbufs.push_back(bp[h]);
       } else
-        runs[h].push_back({bp[h], static_cast<uint32_t>(wp[h] - bp[h])});
+        runs[h].push_back({bp[h], static_cast<uint32_t>(wp[h] - bp[h]), p});
     }
     top[block] = last;
     for (++registered; watermark < nblocks && top[watermark] >= 0; ++watermark)
@@ -456,9 +450,9 @@ struct Job {
     }
     uint32_t count[2 * kIds] = {}, pos[kIds],
                        total = 0; // by tag: ids, then their 5xx
-    for (const auto &[rec, n] : mine)
+    for (const auto &[rec, n, base] : mine)
       for (uint32_t i = 0; i < n; ++i)
-        ++count[rec[i].tag];
+        ++count[rec[i] & 4095];
     uint16_t live[kIds]; // the endpoints seen in this hour, in output order
     uint32_t seen = 0;
     for (const uint16_t id : order) {
@@ -471,9 +465,20 @@ struct Job {
     std::vector<int32_t> lat = take(latbufs);
     lat.reserve(1 << 17);
     lat.resize(total + 16);
-    for (const auto &[rec, n] : mine)
-      for (uint32_t i = 0; i < n; ++i)
-        lat[pos[rec[i].tag % kIds]++] = rec[i].lat ^ 0x80000000;
+    for (const auto &[rec, n, base] : mine)
+      for (uint32_t i = 0; i < n; ++i) {
+        const char *s = base + (rec[i] >> 12);
+        uint64_t v = load64(s) ^ 0x3030303030303030, value;
+        const uint64_t other = ((v + 0x7676767676767676) | v) & 0x8080808080808080;
+        if (other) {
+          const uint32_t digits = __builtin_ctzll(other) >> 3;
+          value = digits8(v << (64 - 8 * digits));
+        } else {
+          for (value = digits8(v), s += 8; *s != '\n'; ++s)
+            value = value * 10 + (*s - '0');
+        }
+        lat[pos[rec[i] % kIds]++] = value ^ 0x80000000;
+      }
 
     static thread_local std::vector<int32_t> scratch;
     std::unique_ptr<char[]> text = take(outbufs);
@@ -507,7 +512,7 @@ struct Job {
     {
       std::lock_guard<std::mutex> lock(mu);
       latbufs.push_back(std::move(lat));
-      for (const auto &[rec, n] : mine)
+      for (const auto &[rec, n, base] : mine)
         runbufs.push_back(rec);
     }
     emit(hour, {std::move(text), length});
@@ -563,12 +568,14 @@ struct Job {
         lock.unlock();
         finalize(hour);
         lock.lock();
+        ++finished;
+        cv.notify_all();
       } else if (next_block < nblocks && next_block < watermark + 2 * threads) {
         const uint32_t block = next_block++;
         lock.unlock();
         parse(*local, block);
         lock.lock();
-      } else if (next_hour >= kHours) {
+      } else if (finished == kHours) {
         lock.unlock(); // drop the file mapping in shared 4 MiB steps so that
                        // exit is cheaper
         constexpr size_t kStep = 4 << 20;
