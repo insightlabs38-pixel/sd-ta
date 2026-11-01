@@ -1,7 +1,7 @@
 name: Track A exactness
 on:
   push:
-    branches: [main, 'research/a-breakthrough-20261101-catalog-cache']
+    branches: [main, 'research/a-breakthrough-20261101-prefix-dispatch']
   workflow_dispatch:
 jobs:
   verify:
