@@ -22,7 +22,7 @@
 namespace {
 constexpr uint32_t kHours = 72, kIds = 2048, kBlock = 256 << 10, kStreams = 4;
 constexpr uint32_t kLag = 2, kNever = 1000, kKeep = 2;
-constexpr uint32_t kMaxLine = 178, kRunCap = kBlock / 40 + 16, kPartCap = kIds * 256;
+constexpr uint32_t kMaxLine = 178, kRunCap = kBlock / 40 + 16;
 const char *const kDays[] = {"2026-10-30", "2026-10-31", "2026-11-01",
                              "2026-11-02"};
 
@@ -31,8 +31,10 @@ struct __attribute__((packed)) Rec {
   uint16_t tag;
 }; // tag: id | 5xx << 11
 using Run = std::pair<Rec *, uint32_t>;
-using Part =
-    std::pair<std::unique_ptr<char[]>, size_t>; // output text, its length
+struct Part {
+  std::unique_ptr<char[]> data;
+  size_t length = 0, capacity = 0;
+};
 
 [[noreturn]] void fail(const char *what) {
   std::perror(what);
@@ -476,10 +478,16 @@ struct Job {
         lat[pos[rec[i].tag % kIds]++] = rec[i].lat ^ 0x80000000;
 
     static thread_local std::vector<int32_t> scratch;
-    std::unique_ptr<char[]> text = take(outbufs);
-    if (!text)
-      text.reset(new char[kPartCap + 256]);
-    char *out = text.get(), label[22];
+    // Exact upper bound: 21-byte hour, endpoint, six numbers and LF.
+    size_t capacity = 256; // slack for the 128-byte endpoint stores
+    for (uint32_t i = 0; i < seen; ++i)
+      capacity += 79 + names.len[live[i]];
+    Part text = take(outbufs);
+    if (text.capacity < capacity) {
+      text.data.reset(new char[capacity]);
+      text.capacity = capacity;
+    }
+    char *out = text.data.get(), label[22];
     std::snprintf(label, sizeof label, "%sT%02u:00:00Z ",
                   kDays[(hour + 18) / 24], (hour + 18) % 24);
     for (uint32_t i = 0; i < seen; ++i) {
@@ -503,14 +511,14 @@ struct Job {
       out = errors ? put(out, uint64_t{errors} * 1000000 / n) : put(out, 0);
       *out++ = '\n';
     }
-    const size_t length = out - text.get();
+    const size_t length = out - text.data.get();
     {
       std::lock_guard<std::mutex> lock(mu);
       latbufs.push_back(std::move(lat));
       for (const auto &[rec, n] : mine)
         runbufs.push_back(rec);
     }
-    emit(hour, {std::move(text), length});
+    emit(hour, {std::move(text.data), length, text.capacity});
   }
 
   // Whoever completes an hour writes all hours that are ready in order (a
@@ -521,25 +529,25 @@ struct Job {
     parts[hour] = std::move(ready);
     if (writing)
       return;
-    for (writing = true; written < kHours && parts[written].first; ++written) {
+    for (writing = true; written < kHours && parts[written].data; ++written) {
       Part part = std::move(parts[written]);
       lock.unlock();
-      for (size_t done = 0; done < part.second;) {
+      for (size_t done = 0; done < part.length;) {
         const ssize_t w =
-            write(fd, part.first.get() + done, part.second - done);
+            write(fd, part.data.get() + done, part.length - done);
         if (w <= 0)
           fail("write summary");
         done += w;
       }
-      end[written + 1] = end[written] + part.second;
+      end[written + 1] = end[written] + part.length;
       if (written + 1 == kHours && ftruncate(fd, end[kHours]))
         fail("size summary");
-      sync_file_range(fd, end[written], part.second, SYNC_FILE_RANGE_WRITE);
+      sync_file_range(fd, end[written], part.length, SYNC_FILE_RANGE_WRITE);
       if (written >= kKeep)
         posix_fadvise(fd, 0, end[written - kKeep + 1], POSIX_FADV_DONTNEED);
       {
         std::lock_guard<std::mutex> pool_lock(mu);
-        outbufs.push_back(std::move(part.first));
+        outbufs.push_back(std::move(part));
       }
       lock.lock();
     }
