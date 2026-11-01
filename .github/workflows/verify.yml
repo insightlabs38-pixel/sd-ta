@@ -99,11 +99,11 @@ jobs:
             sd-track-a
           echo '495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3  /tmp/a-container-out/summary.txt' | sha256sum -c -
 
-      - name: Matched pinned-toolchain axes
+      - name: Matched pinned-toolchain axes vs PR8
         shell: bash
         run: |
           set -euo pipefail
-          git fetch origin 4aa987898640222750cd5ee68500c3f3b9967375
+          git fetch origin 8b304dd30a1eae30632576d3ebdb66d90336831d
           mkdir -p /tmp/champion-context
           git show FETCH_HEAD:track-a/main.cpp > /tmp/champion-context/main.cpp
           cp track-a/Dockerfile /tmp/champion-context/Dockerfile
