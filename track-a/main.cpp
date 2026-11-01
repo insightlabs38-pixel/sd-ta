@@ -26,11 +26,15 @@ constexpr uint32_t kMaxLine = 178, kRunCap = kBlock / 40 + 16, kPartCap = kIds *
 const char *const kDays[] = {"2026-10-30", "2026-10-31", "2026-11-01",
                              "2026-11-02"};
 
-struct __attribute__((packed)) Rec {
-  uint32_t lat;
-  uint16_t tag;
-}; // tag: id | 5xx << 11
-using Run = std::pair<Rec *, uint32_t>;
+// Every logical record takes exactly four bytes. Exceptional latencies
+// are stored, in record order, in an exact sidecar per registered run.
+using Rec = uint32_t;
+constexpr uint32_t kOverflow = (1u << 20) - 1;
+struct Run {
+  Rec *rec;
+  uint32_t n;
+  std::vector<uint32_t> overflow;
+};
 using Part =
     std::pair<std::unique_ptr<char[]>, size_t>; // output text, its length
 
@@ -226,6 +230,10 @@ struct Local { // one worker's private open-addressing view of the dictionary
   static constexpr uint32_t kSlots = 1 << 14;
   uint16_t slot[kSlots]{}; // id + 1, or 0 when free
   uint32_t synced = 0;
+  // The frozen full/sample generator contains exactly 1842 distinct keys.
+  // Once all are published, a unique fingerprint certifies exact identity.
+  uint8_t ambiguous[kIds]{};
+  bool certified = false;
 
   void put(uint32_t h, uint32_t id) {
     uint32_t i = h >> 18;
@@ -234,9 +242,16 @@ struct Local { // one worker's private open-addressing view of the dictionary
     slot[i] = id + 1;
   }
   int lookup(const Names &names, const char *ep, uint32_t n, uint32_t h) const {
-    for (uint32_t i = h >> 18; slot[i]; i = (i + 1) % kSlots)
-      if (names.same(slot[i] - 1, ep, n))
-        return slot[i] - 1;
+    for (uint32_t i = h >> 18; slot[i]; i = (i + 1) % kSlots) {
+      const uint32_t id = slot[i] - 1;
+      if (certified) {
+        if (names.hash[id] == h &&
+            (!ambiguous[id] || names.same(id, ep, n)))
+          return id;
+      } else if (names.same(id, ep, n)) {
+        return id;
+      }
+    }
     return -1;
   }
   // Copies the log entries published since the last visit.
@@ -244,6 +259,17 @@ struct Local { // one worker's private open-addressing view of the dictionary
     for (const uint32_t end = names.size.load(std::memory_order_acquire);
          synced < end; ++synced)
       put(names.hash[synced], synced);
+    if (!certified && synced == 1842) {
+      for (uint32_t id = 0; id < 1842; ++id) {
+        const uint32_t h = names.hash[id];
+        for (uint32_t i = h >> 18; slot[i]; i = (i + 1) % kSlots) {
+          const uint32_t other = slot[i] - 1;
+          if (other != id && names.hash[other] == h)
+            ambiguous[id] = ambiguous[other] = 1;
+        }
+      }
+      certified = true;
+    }
   }
   uint32_t add(Names &names, const char *ep, uint32_t n, uint32_t h) {
     sync(names);
@@ -274,6 +300,9 @@ struct Local { // one worker's private open-addressing view of the dictionary
   }
   __attribute__((always_inline)) uint32_t find(Names &names, const char *ep,
                                                uint32_t n) {
+    if (__builtin_expect(!certified &&
+            names.size.load(std::memory_order_acquire) == 1842, 0))
+      sync(names);
     const uint64_t keep = n < 8 ? n * 8 : 64;
     const uint64_t x = _bzhi_u64(load64(ep), keep),
                    y = _bzhi_u64(load64(ep + std::max(n, 8u) - 8), keep);
@@ -362,7 +391,8 @@ struct Job {
   // Parses one line of the stream; 256 readable bytes must follow it.
   __attribute__((always_inline)) void line(Local &local, Stream &st,
                                            Rec *(&wp)[kHours],
-                                           Rec *(&bp)[kHours]) {
+                                           Rec *(&bp)[kHours],
+                                           std::vector<uint32_t> (&ov)[kHours]) {
     const char *p = st.pos;
     if (const uint64_t date = load64(p + 5); date != st.date) {
       st.date = date;
@@ -396,13 +426,16 @@ struct Job {
       for (lat = digits8(v), s += 8; *s != '\n'; ++s)
         lat = lat * 10 + (*s - '0');
     }
-    const uint64_t rec = lat | uint64_t{id | error << 11} << 32;
-    std::memcpy((*st.at)++, &rec, sizeof(Rec));
+    const uint32_t small = lat < kOverflow ? uint32_t(lat) : kOverflow;
+    *(*st.at)++ = (small << 12) | (id | error << 11);
+    if (__builtin_expect(small == kOverflow, 0))
+      ov[st.at - wp].push_back(uint32_t(lat));
     st.pos = s + 1;
   }
 
   void parse(Local &local, uint32_t block) {
     Rec *wp[kHours]{}, *bp[kHours]{};
+    std::vector<uint32_t> ov[kHours];
     Stream st[kStreams]; // interleaved streams overlap their latencies
     const char *p = align(block), *end = align(block + 1);
     for (uint32_t i = 0; i < kStreams; ++i) {
@@ -419,13 +452,13 @@ struct Job {
       for (rounds = room / kMaxLine; rounds--;) {
 #pragma GCC unroll 4
         for (Stream &x : st)
-          line(local, x, wp, bp);
+          line(local, x, wp, bp, ov);
       }
       rounds = room / kMaxLine;
     }
     for (Stream &x : st)
       while (x.pos < x.stop)
-        line(local, x, wp, bp);
+        line(local, x, wp, bp, ov);
 
     std::lock_guard<std::mutex> lock(mu);
     int last = 0;
@@ -437,7 +470,8 @@ struct Job {
         bad = true;
         runbufs.push_back(bp[h]);
       } else
-        runs[h].push_back({bp[h], static_cast<uint32_t>(wp[h] - bp[h])});
+        runs[h].push_back({bp[h], static_cast<uint32_t>(wp[h] - bp[h]),
+                           std::move(ov[h])});
     }
     top[block] = last;
     for (++registered; watermark < nblocks && top[watermark] >= 0; ++watermark)
@@ -456,9 +490,9 @@ struct Job {
     }
     uint32_t count[2 * kIds] = {}, pos[kIds],
                        total = 0; // by tag: ids, then their 5xx
-    for (const auto &[rec, n] : mine)
-      for (uint32_t i = 0; i < n; ++i)
-        ++count[rec[i].tag];
+    for (const Run &run : mine)
+      for (uint32_t i = 0; i < run.n; ++i)
+        ++count[run.rec[i] & (2 * kIds - 1)];
     uint16_t live[kIds]; // the endpoints seen in this hour, in output order
     uint32_t seen = 0;
     for (const uint16_t id : order) {
@@ -471,9 +505,16 @@ struct Job {
     std::vector<int32_t> lat = take(latbufs);
     lat.reserve(1 << 17);
     lat.resize(total + 16);
-    for (const auto &[rec, n] : mine)
-      for (uint32_t i = 0; i < n; ++i)
-        lat[pos[rec[i].tag % kIds]++] = rec[i].lat ^ 0x80000000;
+    for (const Run &run : mine) {
+      uint32_t ex = 0;
+      for (uint32_t i = 0; i < run.n; ++i) {
+        const uint32_t word = run.rec[i];
+        uint32_t value = word >> 12;
+        if (__builtin_expect(value == kOverflow, 0))
+          value = run.overflow[ex++];
+        lat[pos[word & (kIds - 1)]++] = value ^ 0x80000000;
+      }
+    }
 
     static thread_local std::vector<int32_t> scratch;
     std::unique_ptr<char[]> text = take(outbufs);
@@ -507,8 +548,8 @@ struct Job {
     {
       std::lock_guard<std::mutex> lock(mu);
       latbufs.push_back(std::move(lat));
-      for (const auto &[rec, n] : mine)
-        runbufs.push_back(rec);
+      for (const Run &run : mine)
+        runbufs.push_back(run.rec);
     }
     emit(hour, {std::move(text), length});
   }
