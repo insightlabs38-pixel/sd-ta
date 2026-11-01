@@ -290,6 +290,14 @@ __attribute__((always_inline)) char *put(char *out, uint32_t v) {
   return out + 8 - skip;
 }
 
+// One line's decoded fields. Four scans feed one AVX2 decimal conversion.
+struct Prepared {
+  const char *endpoint;
+  uint64_t digits;
+  Rec **at;
+  uint32_t length, scale, tail, error;
+};
+
 struct Job {
   const char *base;
   size_t size;
@@ -341,9 +349,9 @@ struct Job {
   }
 
   // Parses one line of the stream; 256 readable bytes must follow it.
-  __attribute__((always_inline)) void line(Stream &st,
-                                           Rec *(&wp)[kHours],
-                                           Rec *(&bp)[kHours]) {
+  __attribute__((always_inline)) Prepared scan(Stream &st,
+                                               Rec *(&wp)[kHours],
+                                               Rec *(&bp)[kHours]) {
     const char *p = st.pos;
     if (const uint64_t date = load64(p + 5); date != st.date) {
       st.date = date;
@@ -363,23 +371,44 @@ struct Job {
     const uint32_t k1 = __builtin_ctzll(m);
     m &= m - 1;
     const uint32_t k2 = m ? __builtin_ctzll(m) : far_space(q);
-    const uint32_t id = names.find( q + k1 + 1, k2 - k1 - 1);
     const char *s = q + k2 + 1;
     const uint32_t error = *s == '5';
     s += 4;
-    uint64_t v = load64(s) ^ 0x3030303030303030, lat;
+    uint64_t v = load64(s) ^ 0x3030303030303030;
     const uint64_t other = ((v + 0x7676767676767676) | v) & 0x8080808080808080;
+    uint32_t scale = 1, tail = 0;
     if (other) {
       const uint32_t digits = __builtin_ctzll(other) >> 3;
-      lat = digits8(v << (64 - 8 * digits));
+      v <<= 64 - 8 * digits;
       s += digits;
     } else {
-      for (lat = digits8(v), s += 8; *s != '\n'; ++s)
-        lat = lat * 10 + (*s - '0');
+      for (s += 8; *s != '\n'; ++s) {
+        scale *= 10;
+        tail = tail * 10 + (*s - '0');
+      }
     }
-    const uint64_t rec = lat | uint64_t{id | error << 11} << 32;
-    std::memcpy((*st.at)++, &rec, sizeof(Rec));
     st.pos = s + 1;
+    return {q + k1 + 1, v, st.at, k2 - k1 - 1, scale, tail, error};
+  }
+  __attribute__((always_inline)) void append(const Prepared &p, uint32_t latency) {
+    const uint32_t id = names.find(p.endpoint, p.length);
+    const uint64_t record = latency | uint64_t{id | p.error << 11} << 32;
+    std::memcpy((*p.at)++, &record, sizeof(Rec));
+  }
+  void batch(Stream (&st)[kStreams], Rec *(&wp)[kHours], Rec *(&bp)[kHours]) {
+    static_assert(kStreams == 4);
+    Prepared p[4];
+    for (uint32_t i = 0; i < 4; ++i)
+      p[i] = scan(st[i], wp, bp);
+    __m256i v = _mm256_set_epi64x(p[3].digits, p[2].digits, p[1].digits, p[0].digits);
+    v = _mm256_maddubs_epi16(v, _mm256_set1_epi16(0x010a));
+    v = _mm256_madd_epi16(v, _mm256_set1_epi32(0x00010064));
+    v = _mm256_add_epi32(_mm256_mullo_epi32(v, _mm256_set1_epi64x(10000)),
+                         _mm256_srli_epi64(v, 32));
+    alignas(32) uint64_t values[4];
+    _mm256_store_si256((__m256i *)values, v);
+    for (uint32_t i = 0; i < 4; ++i)
+      append(p[i], uint32_t(values[i]) * p[i].scale + p[i].tail);
   }
 
   void parse(uint32_t block) {
@@ -398,15 +427,15 @@ struct Job {
       for (const Stream &x : st)
         room = std::min<size_t>(room, x.stop - x.pos);
       for (rounds = room / kMaxLine; rounds--;) {
-#pragma GCC unroll 4
-        for (Stream &x : st)
-          line(x, wp, bp);
+        batch(st, wp, bp);
       }
       rounds = room / kMaxLine;
     }
     for (Stream &x : st)
-      while (x.pos < x.stop)
-        line(x, wp, bp);
+      while (x.pos < x.stop) {
+        const Prepared p = scan(x, wp, bp);
+        append(p, digits8(p.digits) * p.scale + p.tail);
+      }
 
     std::lock_guard<std::mutex> lock(mu);
     int last = 0;
