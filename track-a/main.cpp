@@ -185,6 +185,44 @@ void multiselect(int32_t *a, int32_t *b, uint32_t lo, uint32_t hi,
     multiselect(b, a, cut, hi, k + left, nk - left, out + left, depth + 1);
 }
 
+
+// Exact stable MSD radix partition of all three nearest ranks at once.
+// This is a distinct counting-based selection architecture, not quickselect.
+// k[] are absolute rank indices; a/b alternate between radix levels.
+void radix3(int32_t *a, int32_t *b, uint32_t lo, uint32_t hi,
+            const uint32_t *k, int nk, int32_t *out, int shift = 24) {
+  if (hi - lo <= 16) {
+    alignas(32) int32_t sorted[16];
+    sort16(a + lo, hi - lo, sorted);
+    for (int i = 0; i < nk; ++i) out[i] = sorted[k[i] - lo];
+    return;
+  }
+  uint32_t count[256]{}, start[257], cursor[256];
+  for (uint32_t i = lo; i < hi; ++i)
+    ++count[((uint32_t(a[i]) ^ 0x80000000u) >> shift) & 255];
+  start[0] = lo;
+  for (int j = 0; j < 256; ++j) {
+    start[j + 1] = start[j] + count[j];
+    cursor[j] = start[j];
+  }
+  for (uint32_t i = lo; i < hi; ++i) {
+    const uint32_t bucket = ((uint32_t(a[i]) ^ 0x80000000u) >> shift) & 255;
+    b[cursor[bucket]++] = a[i];
+  }
+  int first = 0;
+  for (int bucket = 0; bucket < 256 && first < nk; ++bucket) {
+    const int finish = std::lower_bound(k + first, k + nk, start[bucket + 1]) - k;
+    if (finish == first) continue;
+    if (shift == 0) {
+      for (int j = first; j < finish; ++j) out[j] = b[k[j]];
+    } else {
+      radix3(b, a, start[bucket], start[bucket + 1], k + first,
+             finish - first, out + first, shift - 8);
+    }
+    first = finish;
+  }
+}
+
 // Dictionary inserts are tiny and bursty at startup, so waiters spin instead of
 // sleeping.
 struct SpinLock {
@@ -491,7 +529,15 @@ struct Job {
       int32_t value[3];
       if (scratch.size() < n + 16)
         scratch.resize(n + 16);
-      multiselect(a, scratch.data(), 0, n, ranks, 3, value);
+      if (n <= 2) {
+        const int32_t x = a[0], y = n == 2 ? a[1] : x;
+        value[0] = n == 2 ? std::min(x, y) : x;
+        value[1] = value[2] = n == 2 ? std::max(x, y) : x;
+      } else if (n >= 64) {
+        radix3(a, scratch.data(), 0, n, ranks, 3, value);
+      } else {
+        multiselect(a, scratch.data(), 0, n, ranks, 3, value);
+      }
       std::memcpy(out, label, 21);
       for (uint32_t i = 0; i < 128; i += 32)
         _mm256_storeu_si256((__m256i *)(out + 21 + i), load(names.img[id] + i));
