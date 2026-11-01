@@ -2,7 +2,7 @@ FROM gcc:15@sha256:eb5e64286ad47187b32bda75c6b6916166ecb41da56559b8b09e0001748d2
 WORKDIR /src
 COPY main.cpp train.cpp ./
 RUN g++ -O2 -std=c++20 -o /tmp/generate train.cpp && mkdir -p /tmp/pgodata /tmp/data /tmp/out && /tmp/generate /tmp/data/requests.log
-RUN g++ -O3 -march=x86-64-v3 -std=c++20 -DNDEBUG -pthread -fprofile-generate=/tmp/pgodata -o /tmp/profiled main.cpp && \
+RUN g++ -O3 -march=x86-64-v3 -std=c++20 -DNDEBUG -pthread -DSD_PGO_TRAIN -fprofile-generate=/tmp/pgodata -o /tmp/profiled main.cpp && \
     SD_DATA_DIR=/tmp/data SD_OUT_DIR=/tmp/out /tmp/profiled && \
     g++ -O3 -march=x86-64-v3 -std=c++20 -DNDEBUG -pthread -static -fprofile-use=/tmp/pgodata -fprofile-correction -s -o /tmp/profiled main.cpp && \
     cp /tmp/profiled /solution
