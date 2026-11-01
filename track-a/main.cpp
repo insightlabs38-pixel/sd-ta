@@ -70,16 +70,16 @@ uint64_t digits8(uint64_t v) {
 }
 
 // Lane permutations that compress the lanes of an 8-bit mask to the bottom
-// (kLow) or, for the lanes outside the mask, to the top (kHigh) of a vector.
+// followed by the other lanes. One permutation supplies both output stores.
 struct Lanes {
-  uint8_t low[256][8]{}, high[256][8]{};
+  uint8_t order[256][8]{};
   constexpr Lanes() {
     for (int m = 0; m < 256; ++m)
       for (int lane = 0, in = 0, out = 0; lane < 8; ++lane)
         if (m >> lane & 1)
-          low[m][in++] = lane;
+          order[m][in++] = lane;
         else
-          high[m][__builtin_popcount(m) + out++] = lane;
+          order[m][__builtin_popcount(m) + out++] = lane;
   }
 };
 constexpr Lanes kLanes;
@@ -97,18 +97,18 @@ uint32_t split(const int32_t *src, int32_t *dst, uint32_t lo, uint32_t hi,
     auto lanes = [&](const uint8_t *idx) {
       return _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i *)idx));
     };
-    _mm256_storeu_si256((__m256i *)(dst + l),
-                        _mm256_permutevar8x32_epi32(v, lanes(kLanes.low[m])));
-    _mm256_storeu_si256((__m256i *)(dst + r - 8),
-                        _mm256_permutevar8x32_epi32(v, lanes(kLanes.high[m])));
+    const __m256i packed = _mm256_permutevar8x32_epi32(v, lanes(kLanes.order[m]));
+    _mm256_storeu_si256((__m256i *)(dst + l), packed);
+    _mm256_storeu_si256((__m256i *)(dst + r - 8), packed);
     l += __builtin_popcount(m);
     r -= 8 - __builtin_popcount(m);
   }
   for (; i < hi; ++i) {
     const int32_t v = src[i];
     dst[l] = dst[r - 1] = v;
-    l += v < pivot;
-    r -= v >= pivot;
+    const uint32_t less = v < pivot;
+    l += less;
+    r += less - 1;
   }
   return l - lo;
 }
