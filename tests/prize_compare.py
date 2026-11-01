@@ -33,6 +33,7 @@ for seed in (1, 2, 3):
             for name in order:
                 (out / 'summary.txt').unlink(missing_ok=True)
                 env = dict(os.environ, SD_THREADS=str(threads), SD_DATA_DIR=str(data), SD_OUT_DIR=str(out))
+                time.sleep(0.105)
                 started = time.perf_counter_ns()
                 subprocess.run([getattr(a, name)], env=env, check=True)
                 elapsed = (time.perf_counter_ns() - started) / 1e9

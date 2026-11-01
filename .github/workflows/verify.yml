@@ -104,10 +104,10 @@ jobs:
         run: |
           set -euo pipefail
           git fetch origin 4aa987898640222750cd5ee68500c3f3b9967375
-          mkdir -p /tmp/champion
-          git show FETCH_HEAD:track-a/main.cpp > /tmp/champion/main.cpp
-          cp track-a/Dockerfile /tmp/champion/Dockerfile
-          docker build --network=none --pull=false -t sd-champion /tmp/champion
+          mkdir -p /tmp/champion-context
+          git show FETCH_HEAD:track-a/main.cpp > /tmp/champion-context/main.cpp
+          cp track-a/Dockerfile /tmp/champion-context/Dockerfile
+          docker build --network=none --pull=false -t sd-champion /tmp/champion-context
           for pair in sd-champion:champion sd-track-a:candidate; do
             image=${pair%:*}
             label=${pair#*:}
