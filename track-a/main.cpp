@@ -31,8 +31,12 @@ struct __attribute__((packed)) Rec {
   uint16_t tag;
 }; // tag: id | 5xx << 11
 using Run = std::pair<Rec *, uint32_t>;
-using Part =
-    std::pair<std::unique_ptr<char[]>, size_t>; // output text, its length
+// A completed hour waits as exact numeric results, not expanded output text.
+struct Result {
+  uint32_t count, p50, p95, p99, errors;
+  uint16_t id;
+};
+using Part = std::pair<std::unique_ptr<Result[]>, uint32_t>;
 
 [[noreturn]] void fail(const char *what) {
   std::perror(what);
@@ -199,15 +203,14 @@ struct SpinLock {
   void unlock() { held.clear(std::memory_order_release); }
 };
 
-// Exact endpoint dictionary. The global part is an append-only log (key image,
-// length, fingerprint) behind a lock whose size is published with a release
-// store; entries below it never change. Each worker mirrors the log in a private
-// bucket table, so the hot lookups are plain SIMD reads without sharing. Keys
-// are stored after a space and zero-padded, so n + 1 equal bytes prove equality.
+// Slots publish an immutable key with release/acquire ordering. Readers always
+// compare the complete endpoint; hash collisions never establish identity.
+// Only insertion and the byte-ordered ID list need the writer lock.
 struct Names {
   alignas(64) char img[kIds][128]{};
-  uint32_t len[kIds]{}, hash[kIds]{};
-  std::atomic<uint32_t> size{0};
+  uint32_t len[kIds]{}, size = 0;
+  static constexpr uint32_t kSlots = 1 << 14;
+  std::atomic<uint16_t> slot[kSlots]{}; // release-published id + 1
   std::vector<uint16_t> sorted; // ids in byte order of their names (under mu)
   SpinLock mu;
 
@@ -220,66 +223,43 @@ struct Names {
     return !_bzhi_u64(~(eq(0) | eq(32)), n + 1) &&
            (n < 64 || !std::memcmp(img[id] + 64, ep + 64, n - 63));
   }
-};
-
-struct Local { // one worker's private open-addressing view of the dictionary
-  static constexpr uint32_t kSlots = 1 << 14;
-  uint16_t slot[kSlots]{}; // id + 1, or 0 when free
-  uint32_t synced = 0;
-
-  void put(uint32_t h, uint32_t id) {
-    uint32_t i = h >> 18;
-    while (slot[i])
-      i = (i + 1) % kSlots;
-    slot[i] = id + 1;
+  int lookup(const char *ep, uint32_t n, uint32_t h) const {
+    for (uint32_t i = h >> 18;; i = (i + 1) % kSlots) {
+      const uint32_t entry = slot[i].load(std::memory_order_acquire);
+      if (!entry)
+        return -1;
+      if (same(entry - 1, ep, n))
+        return entry - 1;
+    }
   }
-  int lookup(const Names &names, const char *ep, uint32_t n, uint32_t h) const {
-    for (uint32_t i = h >> 18; slot[i]; i = (i + 1) % kSlots)
-      if (names.same(slot[i] - 1, ep, n))
-        return slot[i] - 1;
-    return -1;
-  }
-  // Copies the log entries published since the last visit.
-  void sync(const Names &names) {
-    for (const uint32_t end = names.size.load(std::memory_order_acquire);
-         synced < end; ++synced)
-      put(names.hash[synced], synced);
-  }
-  uint32_t add(Names &names, const char *ep, uint32_t n, uint32_t h) {
-    sync(names);
-    if (const int id = lookup(names, ep, n, h); id >= 0)
+  uint32_t add(const char *ep, uint32_t n, uint32_t h) {
+    std::lock_guard<SpinLock> lock(mu);
+    if (const int id = lookup(ep, n, h); id >= 0)
       return id;
-    std::lock_guard<SpinLock> lock(names.mu);
-    sync(names); // another worker may have published it meanwhile
-    if (const int id = lookup(names, ep, n, h); id >= 0)
-      return id;
-    const uint32_t id = names.size.load(std::memory_order_relaxed);
+    const uint32_t id = size++;
     if (id >= kIds)
       fail("too many endpoints");
-    std::memcpy(names.img[id], ep, n);
-    names.img[id][n] = ' ';
-    names.len[id] = n;
-    names.hash[id] = h;
-    names.sorted.insert(
-        std::lower_bound(names.sorted.begin(), names.sorted.end(), id,
-                         [&](uint32_t x, uint32_t y) {
-                           return std::memcmp(names.img[x], names.img[y], 128) <
-                                  0;
-                         }),
-        id);
-    names.size.store(id + 1, std::memory_order_release);
-    put(h, id);
-    synced = id + 1;
+    std::memcpy(img[id], ep, n);
+    img[id][n] = ' ';
+    len[id] = n;
+    sorted.insert(std::lower_bound(sorted.begin(), sorted.end(), id,
+                                  [&](uint32_t x, uint32_t y) {
+                                    return std::memcmp(img[x], img[y], 128) < 0;
+                                  }), id);
+    uint32_t bucket = h >> 18;
+    while (slot[bucket].load(std::memory_order_relaxed))
+      bucket = (bucket + 1) % kSlots;
+    slot[bucket].store(id + 1, std::memory_order_release);
     return id;
   }
-  __attribute__((always_inline)) uint32_t find(Names &names, const char *ep,
+  __attribute__((always_inline)) uint32_t find(const char *ep,
                                                uint32_t n) {
     const uint64_t keep = n < 8 ? n * 8 : 64;
     const uint64_t x = _bzhi_u64(load64(ep), keep),
                    y = _bzhi_u64(load64(ep + std::max(n, 8u) - 8), keep);
     const uint32_t h = _mm_crc32_u64(_mm_crc32_u64(n, x), y);
-    const int id = lookup(names, ep, n, h);
-    return id >= 0 ? id : add(names, ep, n, h);
+    const int id = lookup(ep, n, h);
+    return id >= 0 ? id : add(ep, n, h);
   }
 };
 
@@ -330,7 +310,8 @@ struct Job {
   std::atomic<size_t> zapped{0}; // 4 MiB steps of the mapping released
   std::vector<Rec *> runbufs; // free buffers, guarded by mu
   std::vector<std::vector<int32_t>> latbufs;
-  std::vector<std::unique_ptr<char[]>> outbufs;
+  std::vector<std::unique_ptr<Result[]>> resultbufs;
+  std::unique_ptr<char[]> text = std::make_unique<char[]>(kPartCap + 256);
 
   Job(const char *b, size_t n, uint32_t l, int f, uint32_t t)
       : base(b), size(n), lag(l), nblocks((n + kBlock - 1) / kBlock),
@@ -360,7 +341,7 @@ struct Job {
   }
 
   // Parses one line of the stream; 256 readable bytes must follow it.
-  __attribute__((always_inline)) void line(Local &local, Stream &st,
+  __attribute__((always_inline)) void line(Stream &st,
                                            Rec *(&wp)[kHours],
                                            Rec *(&bp)[kHours]) {
     const char *p = st.pos;
@@ -382,7 +363,7 @@ struct Job {
     const uint32_t k1 = __builtin_ctzll(m);
     m &= m - 1;
     const uint32_t k2 = m ? __builtin_ctzll(m) : far_space(q);
-    const uint32_t id = local.find(names, q + k1 + 1, k2 - k1 - 1);
+    const uint32_t id = names.find( q + k1 + 1, k2 - k1 - 1);
     const char *s = q + k2 + 1;
     const uint32_t error = *s == '5';
     s += 4;
@@ -401,7 +382,7 @@ struct Job {
     st.pos = s + 1;
   }
 
-  void parse(Local &local, uint32_t block) {
+  void parse(uint32_t block) {
     Rec *wp[kHours]{}, *bp[kHours]{};
     Stream st[kStreams]; // interleaved streams overlap their latencies
     const char *p = align(block), *end = align(block + 1);
@@ -419,13 +400,13 @@ struct Job {
       for (rounds = room / kMaxLine; rounds--;) {
 #pragma GCC unroll 4
         for (Stream &x : st)
-          line(local, x, wp, bp);
+          line(x, wp, bp);
       }
       rounds = room / kMaxLine;
     }
     for (Stream &x : st)
       while (x.pos < x.stop)
-        line(local, x, wp, bp);
+        line(x, wp, bp);
 
     std::lock_guard<std::mutex> lock(mu);
     int last = 0;
@@ -469,19 +450,22 @@ struct Job {
       seen += n != 0;
     }
     std::vector<int32_t> lat = take(latbufs);
-    lat.reserve(1 << 17);
     lat.resize(total + 16);
     for (const auto &[rec, n] : mine)
       for (uint32_t i = 0; i < n; ++i)
         lat[pos[rec[i].tag % kIds]++] = rec[i].lat ^ 0x80000000;
 
+    // Scatter consumes the runs. Recycle them before percentile selection and
+    // formatting so that parsing need not allocate another generation.
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      for (const auto &[rec, n] : mine)
+        runbufs.push_back(rec);
+    }
     static thread_local std::vector<int32_t> scratch;
-    std::unique_ptr<char[]> text = take(outbufs);
-    if (!text)
-      text.reset(new char[kPartCap + 256]);
-    char *out = text.get(), label[22];
-    std::snprintf(label, sizeof label, "%sT%02u:00:00Z ",
-                  kDays[(hour + 18) / 24], (hour + 18) % 24);
+    auto result = take(resultbufs);
+    if (!result)
+      result = std::make_unique<Result[]>(kIds);
     for (uint32_t i = 0; i < seen; ++i) {
       const uint16_t id = live[i];
       const uint32_t errors = count[id + kIds], n = count[id] + errors;
@@ -492,25 +476,15 @@ struct Job {
       if (scratch.size() < n + 16)
         scratch.resize(n + 16);
       multiselect(a, scratch.data(), 0, n, ranks, 3, value);
-      std::memcpy(out, label, 21);
-      for (uint32_t i = 0; i < 128; i += 32)
-        _mm256_storeu_si256((__m256i *)(out + 21 + i), load(names.img[id] + i));
-      out += 21 + names.len[id];
-      out = put(put(put(put(put(out, n), uint32_t(value[0]) ^ 0x80000000),
-                        uint32_t(value[1]) ^ 0x80000000),
-                    uint32_t(value[2]) ^ 0x80000000),
-                errors);
-      out = errors ? put(out, uint64_t{errors} * 1000000 / n) : put(out, 0);
-      *out++ = '\n';
+      result[i] = {n, uint32_t(value[0]) ^ 0x80000000,
+                   uint32_t(value[1]) ^ 0x80000000,
+                   uint32_t(value[2]) ^ 0x80000000, errors, id};
     }
-    const size_t length = out - text.get();
     {
       std::lock_guard<std::mutex> lock(mu);
       latbufs.push_back(std::move(lat));
-      for (const auto &[rec, n] : mine)
-        runbufs.push_back(rec);
     }
-    emit(hour, {std::move(text), length});
+    emit(hour, {std::move(result), seen});
   }
 
   // Whoever completes an hour writes all hours that are ready in order (a
@@ -524,22 +498,36 @@ struct Job {
     for (writing = true; written < kHours && parts[written].first; ++written) {
       Part part = std::move(parts[written]);
       lock.unlock();
-      for (size_t done = 0; done < part.second;) {
+      char *out = text.get(), label[22];
+      std::snprintf(label, sizeof label, "%sT%02u:00:00Z ",
+                    kDays[(written + 18) / 24], (written + 18) % 24);
+      for (uint32_t i = 0; i < part.second; ++i) {
+        const Result &r = part.first[i];
+        std::memcpy(out, label, 21);
+        for (uint32_t j = 0; j < 128; j += 32)
+          _mm256_storeu_si256((__m256i *)(out + 21 + j), load(names.img[r.id] + j));
+        out += 21 + names.len[r.id];
+        out = put(put(put(put(put(out, r.count), r.p50), r.p95), r.p99), r.errors);
+        out = put(out, uint64_t{r.errors} * 1000000 / r.count);
+        *out++ = '\n';
+      }
+      const size_t length = out - text.get();
+      for (size_t done = 0; done < length;) {
         const ssize_t w =
-            write(fd, part.first.get() + done, part.second - done);
+            write(fd, text.get() + done, length - done);
         if (w <= 0)
           fail("write summary");
         done += w;
       }
-      end[written + 1] = end[written] + part.second;
+      end[written + 1] = end[written] + length;
       if (written + 1 == kHours && ftruncate(fd, end[kHours]))
         fail("size summary");
-      sync_file_range(fd, end[written], part.second, SYNC_FILE_RANGE_WRITE);
+      sync_file_range(fd, end[written], length, SYNC_FILE_RANGE_WRITE);
       if (written >= kKeep)
         posix_fadvise(fd, 0, end[written - kKeep + 1], POSIX_FADV_DONTNEED);
       {
         std::lock_guard<std::mutex> pool_lock(mu);
-        outbufs.push_back(std::move(part.first));
+        resultbufs.push_back(std::move(part.first));
       }
       lock.lock();
     }
@@ -554,7 +542,6 @@ struct Job {
   // Finalizes hours once they are safe and otherwise parses blocks, but never
   // more than two per worker past the oldest unfinished one.
   void work(uint32_t index) {
-    const auto local = std::make_unique<Local>();
     std::unique_lock<std::mutex> lock(mu);
     for (;;) {
       if (claimable()) {
@@ -566,7 +553,7 @@ struct Job {
       } else if (next_block < nblocks && next_block < watermark + 2 * threads) {
         const uint32_t block = next_block++;
         lock.unlock();
-        parse(*local, block);
+        parse(block);
         lock.lock();
       } else if (next_hour >= kHours) {
         lock.unlock(); // drop the file mapping in shared 4 MiB steps so that
