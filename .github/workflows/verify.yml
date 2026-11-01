@@ -1,7 +1,7 @@
 name: Track A exactness
 on:
   push:
-    branches: [main]
+    branches: [main, a/direct-output-batched]
   workflow_dispatch:
 jobs:
   verify:
