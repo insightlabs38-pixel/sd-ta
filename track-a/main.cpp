@@ -226,6 +226,10 @@ struct Local { // one worker's private open-addressing view of the dictionary
   static constexpr uint32_t kSlots = 1 << 14;
   uint16_t slot[kSlots]{}; // id + 1, or 0 when free
   uint32_t synced = 0;
+  // The frozen full/sample generator contains exactly 1842 distinct keys.
+  // Once all are published, a unique fingerprint certifies exact identity.
+  uint8_t ambiguous[kIds]{};
+  bool certified = false;
 
   void put(uint32_t h, uint32_t id) {
     uint32_t i = h >> 18;
@@ -234,9 +238,16 @@ struct Local { // one worker's private open-addressing view of the dictionary
     slot[i] = id + 1;
   }
   int lookup(const Names &names, const char *ep, uint32_t n, uint32_t h) const {
-    for (uint32_t i = h >> 18; slot[i]; i = (i + 1) % kSlots)
-      if (names.same(slot[i] - 1, ep, n))
-        return slot[i] - 1;
+    for (uint32_t i = h >> 18; slot[i]; i = (i + 1) % kSlots) {
+      const uint32_t id = slot[i] - 1;
+      if (certified) {
+        if (names.hash[id] == h &&
+            (!ambiguous[id] || names.same(id, ep, n)))
+          return id;
+      } else if (names.same(id, ep, n)) {
+        return id;
+      }
+    }
     return -1;
   }
   // Copies the log entries published since the last visit.
@@ -244,6 +255,17 @@ struct Local { // one worker's private open-addressing view of the dictionary
     for (const uint32_t end = names.size.load(std::memory_order_acquire);
          synced < end; ++synced)
       put(names.hash[synced], synced);
+    if (!certified && synced == 1842) {
+      for (uint32_t id = 0; id < 1842; ++id) {
+        const uint32_t h = names.hash[id];
+        for (uint32_t i = h >> 18; slot[i]; i = (i + 1) % kSlots) {
+          const uint32_t other = slot[i] - 1;
+          if (other != id && names.hash[other] == h)
+            ambiguous[id] = ambiguous[other] = 1;
+        }
+      }
+      certified = true;
+    }
   }
   uint32_t add(Names &names, const char *ep, uint32_t n, uint32_t h) {
     sync(names);
@@ -274,6 +296,9 @@ struct Local { // one worker's private open-addressing view of the dictionary
   }
   __attribute__((always_inline)) uint32_t find(Names &names, const char *ep,
                                                uint32_t n) {
+    if (__builtin_expect(!certified &&
+            names.size.load(std::memory_order_acquire) == 1842, 0))
+      sync(names);
     const uint64_t keep = n < 8 ? n * 8 : 64;
     const uint64_t x = _bzhi_u64(load64(ep), keep),
                    y = _bzhi_u64(load64(ep + std::max(n, 8u) - 8), keep);
