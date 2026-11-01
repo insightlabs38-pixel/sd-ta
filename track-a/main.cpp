@@ -22,14 +22,12 @@
 namespace {
 constexpr uint32_t kHours = 72, kIds = 2048, kBlock = 256 << 10, kStreams = 4;
 constexpr uint32_t kLag = 2, kNever = 1000, kKeep = 2;
-constexpr uint32_t kMaxLine = 178, kRunCap = kBlock / 40 + 16, kPartCap = kIds * 256;
+constexpr uint32_t kMaxLine = 178, kRunCap = 2 * (kBlock / 40 + 16), kPartCap = kIds * 256;
 const char *const kDays[] = {"2026-10-30", "2026-10-31", "2026-11-01",
                              "2026-11-02"};
 
-struct __attribute__((packed)) Rec {
-  uint32_t lat;
-  uint16_t tag;
-}; // tag: id | 5xx << 11
+using Rec = uint32_t; // 20-bit latency and 12-bit tag, or sentinel + u32
+constexpr uint32_t kOverflow = (1u << 20) - 1;
 using Run = std::pair<Rec *, uint32_t>;
 using Part =
     std::pair<std::unique_ptr<char[]>, size_t>; // output text, its length
@@ -396,8 +394,10 @@ struct Job {
       for (lat = digits8(v), s += 8; *s != '\n'; ++s)
         lat = lat * 10 + (*s - '0');
     }
-    const uint64_t rec = lat | uint64_t{id | error << 11} << 32;
-    std::memcpy((*st.at)++, &rec, sizeof(Rec));
+    const uint32_t small = lat < kOverflow ? uint32_t(lat) : kOverflow;
+    *(*st.at)++ = (small << 12) | (id | error << 11);
+    if (__builtin_expect(small == kOverflow, 0))
+      *(*st.at)++ = uint32_t(lat);
     st.pos = s + 1;
   }
 
@@ -457,8 +457,11 @@ struct Job {
     uint32_t count[2 * kIds] = {}, pos[kIds],
                        total = 0; // by tag: ids, then their 5xx
     for (const auto &[rec, n] : mine)
-      for (uint32_t i = 0; i < n; ++i)
-        ++count[rec[i].tag];
+      for (uint32_t i = 0; i < n;) {
+        const uint32_t word = rec[i++];
+        ++count[word & (2 * kIds - 1)];
+        i += (word >> 12) == kOverflow;
+      }
     uint16_t live[kIds]; // the endpoints seen in this hour, in output order
     uint32_t seen = 0;
     for (const uint16_t id : order) {
@@ -472,8 +475,13 @@ struct Job {
     lat.reserve(1 << 17);
     lat.resize(total + 16);
     for (const auto &[rec, n] : mine)
-      for (uint32_t i = 0; i < n; ++i)
-        lat[pos[rec[i].tag % kIds]++] = rec[i].lat ^ 0x80000000;
+      for (uint32_t i = 0; i < n;) {
+        const uint32_t word = rec[i++];
+        uint32_t value = word >> 12;
+        if (__builtin_expect(value == kOverflow, 0))
+          value = rec[i++];
+        lat[pos[word & (kIds - 1)]++] = value ^ 0x80000000;
+      }
 
     static thread_local std::vector<int32_t> scratch;
     std::unique_ptr<char[]> text = take(outbufs);
