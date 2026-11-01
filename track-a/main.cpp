@@ -226,7 +226,7 @@ struct Local { // one worker's private open-addressing view of the dictionary
   static constexpr uint32_t kSlots = 1 << 14;
   uint16_t slot[kSlots]{}; // id + 1, or 0 when free
   uint32_t synced = 0;
-  struct Hot { uint32_t hash; uint16_t id, len; };
+  struct Hot { uint64_t first, last; uint16_t id, len; };
   Hot hot[128]{}; // per-worker exact-verified L0 identity cache
 
   void put(uint32_t h, uint32_t id) {
@@ -279,13 +279,15 @@ struct Local { // one worker's private open-addressing view of the dictionary
     const uint64_t keep = n < 8 ? n * 8 : 64;
     const uint64_t x = _bzhi_u64(load64(ep), keep),
                    y = _bzhi_u64(load64(ep + std::max(n, 8u) - 8), keep);
-    const uint32_t h = _mm_crc32_u64(_mm_crc32_u64(n, x), y);
-    Hot &entry = hot[(h ^ (h >> 9)) & 127];
-    if (entry.len == n && entry.hash == h &&
+    const uint64_t m = (x * 0x9e3779b97f4a7c15ull) ^
+                       (y * 0xc2b2ae3d27d4eb4full) ^ (uint64_t(n) << 43);
+    Hot &entry = hot[(m ^ (m >> 32)) & 127];
+    if (entry.len == n && entry.first == x && entry.last == y &&
         names.same(entry.id, ep, n)) return entry.id;
+    const uint32_t h = _mm_crc32_u64(_mm_crc32_u64(n, x), y);
     const int id = lookup(names, ep, n, h);
     const uint32_t resolved = id >= 0 ? id : add(names, ep, n, h);
-    entry = {h, uint16_t(resolved), uint16_t(n)};
+    entry = {x, y, uint16_t(resolved), uint16_t(n)};
     return resolved;
   }
 };
