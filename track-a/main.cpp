@@ -229,6 +229,8 @@ struct Local { // one worker's private open-addressing view of the dictionary
   // The frozen full/sample generator contains exactly 1842 distinct keys.
   // Once all are published, a unique fingerprint certifies exact identity.
   uint8_t ambiguous[kIds]{};
+  static constexpr uint32_t kDirectBits = 13;
+  uint16_t direct[1 << kDirectBits]{}; // id+1, or kIds+1 for ambiguous
   bool certified = false;
 
   void put(uint32_t h, uint32_t id) {
@@ -238,6 +240,11 @@ struct Local { // one worker's private open-addressing view of the dictionary
     slot[i] = id + 1;
   }
   int lookup(const Names &names, const char *ep, uint32_t n, uint32_t h) const {
+    if (certified) {
+      const uint16_t unique = direct[h >> (32 - kDirectBits)];
+      if (unique && unique <= kIds)
+        return unique - 1;
+    }
     for (uint32_t i = h >> 18; slot[i]; i = (i + 1) % kSlots) {
       const uint32_t id = slot[i] - 1;
       if (certified) {
@@ -263,6 +270,10 @@ struct Local { // one worker's private open-addressing view of the dictionary
           if (other != id && names.hash[other] == h)
             ambiguous[id] = ambiguous[other] = 1;
         }
+      }
+      for (uint32_t id = 0; id < 1842; ++id) {
+        uint16_t &v = direct[names.hash[id] >> (32 - kDirectBits)];
+        v = v ? kIds + 1 : id + 1;
       }
       certified = true;
     }
