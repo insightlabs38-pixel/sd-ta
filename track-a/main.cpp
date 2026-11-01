@@ -3,6 +3,7 @@
 // hour is finalized once the finished file prefix is kLag hours past it.
 // A late line that breaks this is detected and the run is repeated exactly.
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <charconv>
 #include <condition_variable>
@@ -290,6 +291,15 @@ __attribute__((always_inline)) char *put(char *out, uint32_t v) {
   return out + 8 - skip;
 }
 
+// The seven grammar-defined methods have distinct (first + 5*second) mod 64.
+// This exact dispatch only locates the endpoint; its complete bytes still match.
+constexpr auto kMethodLength = [] {
+  std::array<uint8_t, 64> length{};
+  for (const char *method : {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})
+    length[(method[0] + 5 * method[1]) % 64] = std::char_traits<char>::length(method);
+  return length;
+}();
+
 struct Job {
   const char *base;
   size_t size;
@@ -358,13 +368,12 @@ struct Job {
     }
     _mm_prefetch(p + 1280, _MM_HINT_T0);
     _mm_prefetch(p + 1344, _MM_HINT_T0);
-    const char *q = p + 28;
-    uint64_t m = spaces(q) | uint64_t{spaces(q + 32)} << 32;
-    const uint32_t k1 = __builtin_ctzll(m);
-    m &= m - 1;
-    const uint32_t k2 = m ? __builtin_ctzll(m) : far_space(q);
-    const uint32_t id = names.find( q + k1 + 1, k2 - k1 - 1);
-    const char *s = q + k2 + 1;
+    const char *method = p + 28;
+    const char *ep = method + kMethodLength[(method[0] + 5 * method[1]) % 64] + 1;
+    const uint64_t mask = spaces(ep) | uint64_t{spaces(ep + 32)} << 32;
+    const uint32_t n = mask ? __builtin_ctzll(mask) : far_space(ep);
+    const uint32_t id = names.find(ep, n);
+    const char *s = ep + n + 1;
     const uint32_t error = *s == '5';
     s += 4;
     uint64_t v = load64(s) ^ 0x3030303030303030, lat;
