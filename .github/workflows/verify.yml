@@ -1,7 +1,7 @@
 name: Track A exactness
 on:
   push:
-    branches: [main, 'research/a-breakthrough-20261101-word4-sidecar']
+    branches: [main, 'research/a-breakthrough-20261101-word4-sidecar', 'a/word4-smallgroup-20261102']
   workflow_dispatch:
 jobs:
   verify:
@@ -220,4 +220,31 @@ jobs:
                           assert hashlib.sha256(f.read()).hexdigest()==expected
               a,b=(statistics.median(times[k]) for k in cases)
               print(f'SIDECAR_VS_CERT_THREADS={threads} certificate={a:.6f}s cached={b:.6f}s ratio={b/a:.4f}',flush=True)
+          PY
+
+      - name: Paired small-group combination versus word4 baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin d595162bebd3999c57b7c5d6a2bb36051a1723a3
+          git show FETCH_HEAD:track-a/main.cpp > /tmp/a-word4.cpp
+          g++ -O3 -march=x86-64-v3 -std=c++20 -DNDEBUG -pthread -static-libstdc++ -static-libgcc -o /tmp/a-word4 /tmp/a-word4.cpp
+          python - <<'PY'
+          import hashlib, os, random, statistics, subprocess, time
+          expected = '495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3'
+          for workers in (1, 12):
+              env = dict(os.environ, SD_THREADS=str(workers), SD_DATA_DIR='/tmp/a-full', SD_OUT_DIR='/tmp/a-out')
+              samples = {'word4': [], 'combo': []}
+              paths = {'word4': '/tmp/a-word4', 'combo': './solution'}
+              for trial in range(31):
+                  order = list(paths)
+                  random.Random(20261102 + workers*101 + trial).shuffle(order)
+                  for label in order:
+                      t = time.perf_counter()
+                      subprocess.run([paths[label]], env=env, check=True)
+                      samples[label].append(time.perf_counter() - t)
+                      with open('/tmp/a-out/summary.txt','rb') as f:
+                          assert hashlib.sha256(f.read()).hexdigest() == expected
+              a,b = (statistics.median(samples[k]) for k in ('word4','combo'))
+              print(f'WORD4_SMALLGROUP_THREADS={workers} word4={a:.6f}s combo={b:.6f}s ratio={b/a:.4f}', flush=True)
           PY
