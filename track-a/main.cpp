@@ -534,9 +534,6 @@ struct Job {
       end[written + 1] = end[written] + part.second;
       if (written + 1 == kHours && ftruncate(fd, end[kHours]))
         fail("size summary");
-      sync_file_range(fd, end[written], part.second, SYNC_FILE_RANGE_WRITE);
-      if (written >= kKeep)
-        posix_fadvise(fd, 0, end[written - kKeep + 1], POSIX_FADV_DONTNEED);
       {
         std::lock_guard<std::mutex> pool_lock(mu);
         outbufs.push_back(std::move(part.first));
