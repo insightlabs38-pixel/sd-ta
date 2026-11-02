@@ -1,7 +1,7 @@
 name: Track A exactness
 on:
   push:
-    branches: [main]
+    branches: [main, 'a/tmpfs-writeback-20261102']
   workflow_dispatch:
 jobs:
   verify:
@@ -164,3 +164,53 @@ jobs:
           done
       - name: Summary
         run: cat /tmp/summary.txt
+
+      - name: Compare tmpfs-output performance and charged memory
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin 4aa987898640222750cd5ee68500c3f3b9967375
+          git show FETCH_HEAD:track-a/main.cpp > /tmp/a-champion.cpp
+          g++ -O3 -march=x86-64-v3 -std=c++20 -DNDEBUG -pthread -static-libstdc++ -static-libgcc -o /tmp/a-champion /tmp/a-champion.cpp
+          mkdir -p /dev/shm/a-tmpfs-out
+          chmod 777 /dev/shm/a-tmpfs-out
+          python - <<'PY'
+          import hashlib,os,random,statistics,subprocess,time
+          expected='495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3'
+          paths={'champion':'/tmp/a-champion','no-advice':'./solution'}
+          for workers in (6,12):
+              env=dict(os.environ,SD_THREADS=str(workers),SD_DATA_DIR='/tmp/a-full',SD_OUT_DIR='/dev/shm/a-tmpfs-out')
+              times={k:[] for k in paths}
+              for i in range(31):
+                  order=list(paths)
+                  random.Random(20261102+workers*100+i).shuffle(order)
+                  for label in order:
+                      t=time.perf_counter()
+                      subprocess.run([paths[label]],env=env,check=True)
+                      times[label].append(time.perf_counter()-t)
+                      with open('/dev/shm/a-tmpfs-out/summary.txt','rb') as f:
+                          assert hashlib.sha256(f.read()).hexdigest()==expected
+              a,b=(statistics.median(times[k]) for k in paths)
+              print(f'TMPFS_THREADS={workers} champion={a:.6f}s no-advice={b:.6f}s ratio={b/a:.5f}',flush=True)
+          PY
+          mkdir -p /tmp/a-champion-image
+          cp /tmp/a-champion.cpp /tmp/a-champion-image/main.cpp
+          cp track-a/Dockerfile /tmp/a-champion-image/Dockerfile
+          docker build --network=none --pull=false -t sd-track-a-champion -f /tmp/a-champion-image/Dockerfile /tmp/a-champion-image
+          python - <<'PY'
+          import random,statistics,subprocess
+          expected='495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3'
+          images={'champion':'sd-track-a-champion','no-advice':'sd-track-a'}
+          samples={k:[] for k in images}
+          for i in range(8):
+              order=list(images)
+              random.Random(2718+i).shuffle(order)
+              for label in order:
+                  cmd=['docker','run','--rm','--network=none','--read-only','--memory=8g','--memory-swap=8g','--pids-limit=512','--tmpfs','/tmp:rw,size=1g','--tmpfs','/out:rw,size=256m,mode=1777','--mount','type=bind,source=/tmp/a-full,target=/data,readonly','--entrypoint','/bin/sh',images[label],'-c','/solution && sha256sum /out/summary.txt && cat /sys/fs/cgroup/memory.peak']
+                  r=subprocess.run(cmd,check=True,capture_output=True,text=True)
+                  lines=r.stdout.strip().splitlines()
+                  assert lines[0].split()[0]==expected,(label,lines)
+                  samples[label].append(int(lines[-1]))
+          for k,v in samples.items():
+              print(f'TMPFS_CGROUP {k} median={statistics.median(v):.0f} max={max(v)} min={min(v)}',flush=True)
+          PY
